@@ -1,0 +1,54 @@
+name: Android Native Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'android-native/**'
+      - '.github/workflows/android-native-debug.yml'
+  pull_request:
+    paths:
+      - 'android-native/**'
+      - '.github/workflows/android-native-debug.yml'
+
+jobs:
+  build-android-native-debug:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android-native/local.properties
+
+      - name: Build debug APK
+        working-directory: android-native
+        run: ./gradlew --no-daemon :app:assembleDebug
+
+      - name: Verify APK output
+        run: |
+          ls -lah android-native/app/build/outputs/apk/debug
+          test -f android-native/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-native-player-debug-apk
+          path: android-native/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
