@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
@@ -67,6 +68,7 @@ private enum class MainTab {
     Player
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WowPlayerApp(viewModel: PlayerViewModel) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()

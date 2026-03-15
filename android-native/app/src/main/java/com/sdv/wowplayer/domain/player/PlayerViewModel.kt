@@ -265,15 +265,20 @@ class PlayerViewModel(
     private fun restoreQueueFromController(controller: MediaController): List<Track> {
         if (controller.mediaItemCount == 0) return _uiState.value.queueTracks
 
-        return controller.mediaItems.mapIndexed { index, mediaItem ->
-            val mediaUri = mediaItem.localConfiguration?.uri ?: Uri.EMPTY
-            Track(
-                id = mediaItem.mediaId.ifBlank { "restored_$index" },
-                title = mediaItem.mediaMetadata.title?.toString() ?: "Track ${index + 1}",
-                artist = mediaItem.mediaMetadata.artist?.toString() ?: "Unknown artist",
-                durationMs = 0L,
-                uri = mediaUri
-            )
+        return buildList {
+            for (index in 0 until controller.mediaItemCount) {
+                val mediaItem = controller.getMediaItemAt(index)
+                val mediaUri = mediaItem.localConfiguration?.uri ?: Uri.EMPTY
+                add(
+                    Track(
+                        id = mediaItem.mediaId.ifBlank { "restored_$index" },
+                        title = mediaItem.mediaMetadata.title?.toString() ?: "Track ${index + 1}",
+                        artist = mediaItem.mediaMetadata.artist?.toString() ?: "Unknown artist",
+                        durationMs = 0L,
+                        uri = mediaUri
+                    )
+                )
+            }
         }
     }
 
