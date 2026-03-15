@@ -1,11 +1,12 @@
-# Wow Web Music Player v2 🎧✨
+# Wow Web Music Player v3 🎧⚡
 
 Showcase-grade web music player on **Vite + React + TypeScript**, optimized for **GitHub Pages**.
 
-- Beat-synced visual FX (bass / mid / treble reactive)
-- Dual-deck crossfade engine + smart queue
-- Installable PWA with offline cache + offline fallback screen
-- Media Session API (lockscreen / headset / system media keys)
+- Gapless-ready dual-deck playback + crossfade compatibility
+- Adaptive loudness leveling (perceived loudness balancing, no hard compression)
+- Visual presets: **Neon / Calm / Club**
+- Persistent user settings in `localStorage`
+- Installable PWA + Media Session API support
 
 ![Screenshot](./docs/screenshot.png)
 
@@ -19,31 +20,42 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
 
 ---
 
-## What’s new in v2
+## What’s new in v3
 
-### 1) Beat-synced visual FX
-- Real-time audio analysis with smoothed bass/mid/treble energy
-- Reactive UI glow/aurora + visualizer bars tied to track dynamics
-- FX intensity switch: **low / med / high**
+### 1) Gapless + loudness leveling
+- Improved deck prewarming to minimize click/gap artifacts between tracks
+- Keeps compatibility with existing crossfade engine (0–8s)
+- Adds soft safety micro-ramp even with `crossfade=0` to reduce transition clicks
+- Per-track adaptive loudness compensation (light touch, no aggressive compression)
 
-### 2) Crossfade + smart queue
-- Dual-audio-deck playback with smooth crossfade (0–8s)
-- Shuffle mode with visible queue order
-- Repeat modes: **off / all / one**
-- Queue UI shows exact upcoming order and allows jump-to-track
+### 2) Visual presets
+- Added 3 presets:
+  - **Neon** (balanced motion)
+  - **Calm** (gentler palette + lower default intensity)
+  - **Club** (high-energy palette + stronger default intensity)
+- Preset changes:
+  - palette colors
+  - background/aurora motion behavior
+  - default FX intensity
 
-### 3) PWA + offline
-- Installable as app (`manifest.webmanifest` + service worker)
-- Static assets + demo audio are cached
-- Dedicated `offline.html` fallback screen for network loss
+### 3) Persistence + migration
+- Saved to `localStorage`:
+  - preset
+  - FX intensity
+  - crossfade
+  - repeat mode
+  - volume
+- Includes safe fallback/migration behavior for users without v3 data yet
 
-### 4) Media Session API
-- Lockscreen/system controls: play/pause/prev/next
-- Current track metadata is published to media session
+### 4) UX polishing
+- Added explicit loading state during track transitions
+- Added graceful empty queue state
+- Micro-animations tuned for responsiveness (with `prefers-reduced-motion` fallback)
+- Improved accessibility labels (`aria-label`) for key controls
 
 ---
 
-## Features (full)
+## Features
 
 - ▶️ Play / Pause
 - ⏮ / ⏭ Previous / Next
@@ -52,7 +64,8 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
 - 🎚 Crossfade slider (0–8s)
 - 🔀 Shuffle
 - 🔁 Repeat mode cycle (`off → all → one`)
-- 🌈 Beat-reactive FX with intensity control
+- 🌈 Visual presets (`Neon / Calm / Club`)
+- ✨ Beat-reactive FX with intensity control
 - ⌨️ Keyboard shortcuts:
   - `Space` — play/pause
   - `←/→` — seek ±5s
@@ -68,7 +81,7 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
 - React 19
 - TypeScript
 - Vite 8
-- Web Audio API (analyser + crossfade gains)
+- Web Audio API (analyser + gain staging + crossfade)
 - Media Session API
 - Service Worker + Web App Manifest
 - GitHub Actions (Pages deploy)

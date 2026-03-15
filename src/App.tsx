@@ -12,6 +12,16 @@ type Track = {
 
 type RepeatMode = 'off' | 'all' | 'one';
 type FxIntensity = 'low' | 'med' | 'high';
+type VisualPreset = 'neon' | 'calm' | 'club';
+
+type PersistedSettings = {
+  version: 3;
+  preset: VisualPreset;
+  intensity: FxIntensity;
+  crossfade: number;
+  repeat: RepeatMode;
+  volume: number;
+};
 
 const tracks: Track[] = [
   { id: 1, title: 'Neon Drift', artist: 'Demo Tone Lab', src: './audio/neon-drift.wav', accent: '#67e8f9', artwork: './favicon.svg' },
@@ -19,10 +29,18 @@ const tracks: Track[] = [
   { id: 3, title: 'Sunrise Glide', artist: 'Demo Tone Lab', src: './audio/sunrise-glide.wav', accent: '#fbbf24', artwork: './favicon.svg' },
 ];
 
+const STORAGE_KEY = 'wwmp-settings-v3';
+
 const FX_MULTIPLIERS: Record<FxIntensity, number> = {
   low: 0.55,
   med: 1,
-  high: 1.5,
+  high: 1.45,
+};
+
+const PRESETS: Record<VisualPreset, { label: string; defaultIntensity: FxIntensity; palette: [string, string, string]; motion: number }> = {
+  neon: { label: 'Neon', defaultIntensity: 'med', palette: ['#22d3ee', '#a855f7', '#38bdf8'], motion: 1 },
+  calm: { label: 'Calm', defaultIntensity: 'low', palette: ['#5eead4', '#93c5fd', '#c4b5fd'], motion: 0.72 },
+  club: { label: 'Club', defaultIntensity: 'high', palette: ['#f43f5e', '#f59e0b', '#06b6d4'], motion: 1.28 },
 };
 
 const formatTime = (seconds: number) => {
@@ -30,6 +48,62 @@ const formatTime = (seconds: number) => {
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, '0')}`;
+};
+
+const clampCrossfade = (seconds: number) => Math.max(0, Math.min(8, seconds));
+const clampVolume = (volume: number) => Math.max(0, Math.min(1, volume));
+
+const isPreset = (value: unknown): value is VisualPreset => typeof value === 'string' && value in PRESETS;
+const isIntensity = (value: unknown): value is FxIntensity => value === 'low' || value === 'med' || value === 'high';
+const isRepeat = (value: unknown): value is RepeatMode => value === 'off' || value === 'all' || value === 'one';
+
+const loadSettings = (): PersistedSettings => {
+  const defaults: PersistedSettings = {
+    version: 3,
+    preset: 'neon',
+    intensity: PRESETS.neon.defaultIntensity,
+    crossfade: 2,
+    repeat: 'all',
+    volume: 0.75,
+  };
+
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return defaults;
+
+    const parsed = JSON.parse(raw) as Partial<PersistedSettings> & { fxIntensity?: FxIntensity; repeatMode?: RepeatMode };
+
+    const preset = isPreset(parsed.preset) ? parsed.preset : defaults.preset;
+    const intensityCandidate = parsed.intensity ?? parsed.fxIntensity;
+    const repeatCandidate = parsed.repeat ?? parsed.repeatMode;
+
+    return {
+      version: 3,
+      preset,
+      intensity: isIntensity(intensityCandidate) ? intensityCandidate : PRESETS[preset].defaultIntensity,
+      crossfade: clampCrossfade(Number(parsed.crossfade ?? defaults.crossfade)),
+      repeat: isRepeat(repeatCandidate) ? repeatCandidate : defaults.repeat,
+      volume: clampVolume(Number(parsed.volume ?? defaults.volume)),
+    };
+  } catch {
+    return defaults;
+  }
+};
+
+const queueNextPosition = (pos: number, mode: RepeatMode, orderLength: number) => {
+  if (mode === 'one') return pos;
+  const next = pos + 1;
+  if (next < orderLength) return next;
+  if (mode === 'all') return 0;
+  return -1;
+};
+
+const queuePrevPosition = (pos: number, mode: RepeatMode, orderLength: number) => {
+  if (mode === 'one') return pos;
+  const prev = pos - 1;
+  if (prev >= 0) return prev;
+  if (mode === 'all') return orderLength - 1;
+  return -1;
 };
 
 const shuffleKeepCurrent = (order: number[], currentTrackIndex: number) => {
@@ -41,9 +115,9 @@ const shuffleKeepCurrent = (order: number[], currentTrackIndex: number) => {
   return [currentTrackIndex, ...rest];
 };
 
-const clampCrossfade = (seconds: number) => Math.max(0, Math.min(8, seconds));
-
 function App() {
+  const initial = useMemo(() => loadSettings(), []);
+
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const progressRafRef = useRef<number | null>(null);
@@ -53,27 +127,29 @@ function App() {
   const sourceNodesRef = useRef<MediaElementAudioSourceNode[]>([]);
   const gainNodesRef = useRef<GainNode[]>([]);
 
-  const decksRef = useRef<[HTMLAudioElement, HTMLAudioElement]>([
-    new Audio(),
-    new Audio(),
-  ]);
+  const decksRef = useRef<[HTMLAudioElement, HTMLAudioElement]>([new Audio(), new Audio()]);
+  const deckTrackRef = useRef<[number | null, number | null]>([null, null]);
   const activeDeckRef = useRef<0 | 1>(0);
   const currentTrackIndexRef = useRef(0);
   const crossfadeTimerRef = useRef<number | null>(null);
+  const loudnessTimerRef = useRef<number | null>(null);
+  const loudnessMapRef = useRef<Record<number, number>>({});
 
   const [queueOrder, setQueueOrder] = useState<number[]>(tracks.map((_, i) => i));
   const [queuePos, setQueuePos] = useState(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isTransitioning, setIsTransitioning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [volume, setVolume] = useState(0.75);
+  const [volume, setVolume] = useState(initial.volume);
   const [visualizerReady, setVisualizerReady] = useState(true);
 
-  const [crossfadeSec, setCrossfadeSec] = useState(2);
+  const [crossfadeSec, setCrossfadeSec] = useState(initial.crossfade);
   const [shuffle, setShuffle] = useState(false);
-  const [repeatMode, setRepeatMode] = useState<RepeatMode>('all');
-  const [fxIntensity, setFxIntensity] = useState<FxIntensity>('med');
+  const [repeatMode, setRepeatMode] = useState<RepeatMode>(initial.repeat);
+  const [fxIntensity, setFxIntensity] = useState<FxIntensity>(initial.intensity);
+  const [preset, setPreset] = useState<VisualPreset>(initial.preset);
 
   const [bassLevel, setBassLevel] = useState(0);
   const [midLevel, setMidLevel] = useState(0);
@@ -81,20 +157,37 @@ function App() {
 
   const currentTrackIndex = queueOrder[queuePos] ?? 0;
   const currentTrack = tracks[currentTrackIndex];
+  const presetConfig = PRESETS[preset];
 
   useEffect(() => {
     currentTrackIndexRef.current = currentTrackIndex;
   }, [currentTrackIndex]);
 
+  useEffect(() => {
+    const payload: PersistedSettings = {
+      version: 3,
+      preset,
+      intensity: fxIntensity,
+      crossfade: clampCrossfade(crossfadeSec),
+      repeat: repeatMode,
+      volume: clampVolume(volume),
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }, [preset, fxIntensity, crossfadeSec, repeatMode, volume]);
+
   const gradientStyle = useMemo(
     () =>
       ({
-        '--track-accent': currentTrack.accent,
+        '--track-accent': currentTrack?.accent ?? '#67e8f9',
         '--fx-bass': bassLevel.toFixed(4),
         '--fx-mid': midLevel.toFixed(4),
         '--fx-treble': trebleLevel.toFixed(4),
+        '--preset-a': presetConfig.palette[0],
+        '--preset-b': presetConfig.palette[1],
+        '--preset-c': presetConfig.palette[2],
+        '--motion-mult': String(presetConfig.motion),
       }) as React.CSSProperties,
-    [currentTrack.accent, bassLevel, midLevel, trebleLevel],
+    [currentTrack?.accent, bassLevel, midLevel, trebleLevel, presetConfig],
   );
 
   const stopVisualizer = () => {
@@ -118,13 +211,20 @@ function App() {
     }
   };
 
+  const clearLoudnessTimer = () => {
+    if (loudnessTimerRef.current) {
+      window.clearInterval(loudnessTimerRef.current);
+      loudnessTimerRef.current = null;
+    }
+  };
+
   const updateMediaSession = (trackIndex: number, playing: boolean) => {
     if (!('mediaSession' in navigator)) return;
     const track = tracks[trackIndex];
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title,
       artist: track.artist,
-      album: 'Wow Web Music Player v2',
+      album: 'Wow Web Music Player v3',
       artwork: track.artwork
         ? [
             { src: track.artwork, sizes: '96x96', type: 'image/svg+xml' },
@@ -155,9 +255,7 @@ function App() {
       return false;
     }
 
-    if (!audioCtxRef.current) {
-      audioCtxRef.current = new Ctx();
-    }
+    if (!audioCtxRef.current) audioCtxRef.current = new Ctx();
 
     if (!analyserRef.current) {
       analyserRef.current = audioCtxRef.current.createAnalyser();
@@ -171,7 +269,7 @@ function App() {
       const analyser = analyserRef.current;
 
       sourceNodesRef.current = decksRef.current.map((deck) => {
-        deck.preload = 'metadata';
+        deck.preload = 'auto';
         deck.crossOrigin = 'anonymous';
         return audioCtxRef.current!.createMediaElementSource(deck);
       });
@@ -190,6 +288,46 @@ function App() {
 
     setVisualizerReady(true);
     return true;
+  };
+
+  const applyDeckGain = (deckIndex: 0 | 1, strength = 1) => {
+    const trackIndex = deckTrackRef.current[deckIndex];
+    if (trackIndex == null) return;
+    const gainNode = gainNodesRef.current[deckIndex];
+    if (!gainNode || !audioCtxRef.current) return;
+
+    const now = audioCtxRef.current.currentTime;
+    const loudnessComp = loudnessMapRef.current[trackIndex] ?? 1;
+    const target = Math.max(0.001, Math.min(1.6, loudnessComp * strength));
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setTargetAtTime(target, now, 0.045);
+  };
+
+  const startLoudnessMonitor = () => {
+    clearLoudnessTimer();
+    const analyser = analyserRef.current;
+    if (!analyser) return;
+
+    const bins = new Uint8Array(analyser.frequencyBinCount);
+    const target = 0.18;
+
+    loudnessTimerRef.current = window.setInterval(() => {
+      if (!isPlaying) return;
+      analyser.getByteTimeDomainData(bins);
+      let sum = 0;
+      for (let i = 0; i < bins.length; i++) {
+        const x = (bins[i] - 128) / 128;
+        sum += x * x;
+      }
+      const rms = Math.sqrt(sum / bins.length);
+      const activeTrackIndex = deckTrackRef.current[activeDeckRef.current];
+      if (activeTrackIndex == null) return;
+
+      const est = Math.max(0.72, Math.min(1.38, target / Math.max(0.06, rms)));
+      const prev = loudnessMapRef.current[activeTrackIndex] ?? 1;
+      loudnessMapRef.current[activeTrackIndex] = prev * 0.9 + est * 0.1;
+      applyDeckGain(activeDeckRef.current);
+    }, 360);
   };
 
   const drawVisualizer = () => {
@@ -225,9 +363,9 @@ function App() {
       a.getByteFrequencyData(dataArray);
       ctx.clearRect(0, 0, width, height);
 
-      const intensity = FX_MULTIPLIERS[fxIntensity];
+      const intensity = FX_MULTIPLIERS[fxIntensity] * presetConfig.motion;
       const barWidth = width / bars;
-      const hueShift = performance.now() * 0.014;
+      const hueShift = performance.now() * 0.014 * presetConfig.motion;
 
       for (let i = 0; i < bars; i++) {
         let sum = 0;
@@ -236,12 +374,12 @@ function App() {
         for (let j = start; j < end; j++) sum += dataArray[j];
         const avg = sum / Math.max(1, end - start);
         const value = Math.pow(avg / 255, 1.3);
-        const barHeight = value * height * (0.45 + intensity * 0.3);
+        const barHeight = value * height * (0.42 + intensity * 0.28);
         const x = i * barWidth;
         const y = height - barHeight;
 
         const hue = (i * 5 + hueShift) % 360;
-        ctx.fillStyle = `hsla(${hue}, 92%, 65%, ${0.28 + value * 0.62})`;
+        ctx.fillStyle = `hsla(${hue}, 92%, 65%, ${0.24 + value * 0.58})`;
         ctx.fillRect(x + 0.7, y, Math.max(1.3, barWidth - 1.8), barHeight);
       }
 
@@ -280,51 +418,47 @@ function App() {
     }
   };
 
-  const queueNextPosition = (pos: number, mode: RepeatMode) => {
-    if (mode === 'one') return pos;
-    const next = pos + 1;
-    if (next < queueOrder.length) return next;
-    if (mode === 'all') return 0;
-    return -1;
-  };
-
-  const queuePrevPosition = (pos: number, mode: RepeatMode) => {
-    if (mode === 'one') return pos;
-    const prev = pos - 1;
-    if (prev >= 0) return prev;
-    if (mode === 'all') return queueOrder.length - 1;
-    return -1;
-  };
-
   const scheduleAutoCrossfade = (position: number) => {
     clearCrossfadeTimer();
     const activeDeck = decksRef.current[activeDeckRef.current];
     const remain = (activeDeck.duration || 0) - (activeDeck.currentTime || 0);
-    const nextPos = queueNextPosition(position, repeatMode);
+    const nextPos = queueNextPosition(position, repeatMode, queueOrder.length);
     const validNext = nextPos >= 0 && nextPos !== position;
     const fade = clampCrossfade(crossfadeSec);
 
-    if (!isPlaying || !validNext || fade <= 0 || !Number.isFinite(remain) || remain <= fade + 0.05) return;
+    if (!isPlaying || !validNext || fade <= 0 || !Number.isFinite(remain) || remain <= fade + 0.06) return;
 
     crossfadeTimerRef.current = window.setTimeout(() => {
       void transitionToPosition(nextPos, true);
     }, Math.max(40, (remain - fade) * 1000));
   };
 
-  const prepareDeck = async (deck: HTMLAudioElement, trackIndex: number) => {
-    deck.src = tracks[trackIndex].src;
-    deck.currentTime = 0;
-    deck.load();
+  const prepareDeck = async (deckIndex: 0 | 1, trackIndex: number) => {
+    const deck = decksRef.current[deckIndex];
+    if (deckTrackRef.current[deckIndex] === trackIndex && deck.src) return;
 
-    if (deck.readyState < 1) {
+    deck.src = tracks[trackIndex].src;
+    deck.load();
+    deckTrackRef.current[deckIndex] = trackIndex;
+
+    if (deck.readyState < 3) {
       await new Promise<void>((resolve) => {
-        const onLoaded = () => {
-          deck.removeEventListener('loadedmetadata', onLoaded);
+        const done = () => {
+          deck.removeEventListener('canplaythrough', done);
           resolve();
         };
-        deck.addEventListener('loadedmetadata', onLoaded, { once: true });
+        deck.addEventListener('canplaythrough', done, { once: true });
       });
     }
+  };
+
+  const prewarmNextDeck = async (fromPosition: number) => {
+    const nextPos = queueNextPosition(fromPosition, repeatMode, queueOrder.length);
+    if (nextPos < 0) return;
+
+    const nextTrackIndex = queueOrder[nextPos];
+    const standby: 0 | 1 = activeDeckRef.current === 0 ? 1 : 0;
+    await prepareDeck(standby, nextTrackIndex);
   };
 
   const transitionToPosition = async (nextPos: number, crossfade: boolean) => {
@@ -332,6 +466,8 @@ function App() {
       setIsPlaying(false);
       return;
     }
+
+    setIsTransitioning(true);
 
     const nextTrackIndex = queueOrder[nextPos];
     const fromDeckIndex = activeDeckRef.current;
@@ -343,8 +479,7 @@ function App() {
     const canUseGraph = ensureAudioGraph();
     if (canUseGraph) await audioCtxRef.current?.resume();
 
-    await prepareDeck(toDeck, nextTrackIndex);
-    toDeck.volume = volume;
+    await prepareDeck(toDeckIndex, nextTrackIndex);
 
     const fade = clampCrossfade(crossfadeSec);
     const useCrossfade = crossfade && fade > 0 && !fromDeck.paused;
@@ -358,18 +493,22 @@ function App() {
       const now = ctx.currentTime;
       const fromGain = gainNodesRef.current[fromDeckIndex].gain;
       const toGain = gainNodesRef.current[toDeckIndex].gain;
+      const targetTo = Math.max(0.001, Math.min(1.6, loudnessMapRef.current[nextTrackIndex] ?? 1));
 
       fromGain.cancelScheduledValues(now);
       toGain.cancelScheduledValues(now);
 
       if (useCrossfade) {
         toGain.setValueAtTime(0.001, now);
-        toGain.exponentialRampToValueAtTime(1, now + fade);
+        toGain.exponentialRampToValueAtTime(targetTo, now + fade);
         fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
         fromGain.exponentialRampToValueAtTime(0.001, now + fade);
       } else {
-        fromGain.setValueAtTime(0.001, now);
-        toGain.setValueAtTime(1, now);
+        // tiny safety ramp to avoid clicks in gapless mode when crossfade=0
+        toGain.setValueAtTime(0.001, now);
+        toGain.exponentialRampToValueAtTime(targetTo, now + 0.015);
+        fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
+        fromGain.exponentialRampToValueAtTime(0.001, now + 0.015);
       }
     }
 
@@ -390,8 +529,11 @@ function App() {
     stopProgressLoop();
     progressLoop();
     drawVisualizer();
+    startLoudnessMonitor();
     updateMediaSession(nextTrackIndex, true);
     scheduleAutoCrossfade(nextPos);
+    void prewarmNextDeck(nextPos);
+    setIsTransitioning(false);
   };
 
   const selectQueuePosition = async (position: number) => {
@@ -409,7 +551,7 @@ function App() {
   };
 
   const nextTrack = async () => {
-    const nextPos = queueNextPosition(queuePos, repeatMode);
+    const nextPos = queueNextPosition(queuePos, repeatMode, queueOrder.length);
     if (nextPos < 0) {
       setIsPlaying(false);
       return;
@@ -425,7 +567,7 @@ function App() {
       return;
     }
 
-    const prevPos = queuePrevPosition(queuePos, repeatMode);
+    const prevPos = queuePrevPosition(queuePos, repeatMode, queueOrder.length);
     if (prevPos < 0) {
       activeDeck.currentTime = 0;
       setProgress(0);
@@ -443,6 +585,7 @@ function App() {
       setIsPlaying(false);
       stopProgressLoop();
       clearCrossfadeTimer();
+      clearLoudnessTimer();
       updateMediaSession(currentTrackIndexRef.current, false);
       return;
     }
@@ -450,29 +593,27 @@ function App() {
     const canUseGraph = ensureAudioGraph();
     if (canUseGraph) {
       await audioCtxRef.current?.resume();
-      const gain = gainNodesRef.current[activeDeckRef.current]?.gain;
-      const now = audioCtxRef.current!.currentTime;
-      if (gain) {
-        gain.cancelScheduledValues(now);
-        gain.setValueAtTime(1, now);
-      }
+      applyDeckGain(activeDeckRef.current);
     }
 
     if (!activeDeck.src) {
-      await prepareDeck(activeDeck, currentTrackIndexRef.current);
+      await prepareDeck(activeDeckRef.current, currentTrackIndexRef.current);
     }
 
-    activeDeck.volume = volume;
     await activeDeck.play();
     setIsPlaying(true);
     drawVisualizer();
+    startLoudnessMonitor();
     stopProgressLoop();
     progressLoop();
     updateMediaSession(currentTrackIndexRef.current, true);
     scheduleAutoCrossfade(queuePos);
+    void prewarmNextDeck(queuePos);
   };
 
   useEffect(() => {
+    if (!tracks.length) return;
+
     const graphReady = ensureAudioGraph();
     if (graphReady) {
       gainNodesRef.current[0].gain.value = 1;
@@ -481,12 +622,10 @@ function App() {
 
     const deckA = decksRef.current[0];
     const deckB = decksRef.current[1];
-    deckA.volume = volume;
-    deckB.volume = volume;
 
     const onEnded = () => {
       if (crossfadeSec > 0) return;
-      const nextPos = queueNextPosition(queuePos, repeatMode);
+      const nextPos = queueNextPosition(queuePos, repeatMode, queueOrder.length);
       if (nextPos < 0) {
         setIsPlaying(false);
         return;
@@ -512,6 +651,7 @@ function App() {
       stopVisualizer();
       stopProgressLoop();
       clearCrossfadeTimer();
+      clearLoudnessTimer();
       deckA.pause();
       deckB.pause();
       void audioCtxRef.current?.close();
@@ -520,13 +660,9 @@ function App() {
   }, []);
 
   useEffect(() => {
-    decksRef.current[0].volume = volume;
-    decksRef.current[1].volume = volume;
-  }, [volume]);
-
-  useEffect(() => {
     if (!isPlaying) return;
     scheduleAutoCrossfade(queuePos);
+    void prewarmNextDeck(queuePos);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queuePos, crossfadeSec, repeatMode, isPlaying]);
 
@@ -598,19 +734,36 @@ function App() {
     });
   };
 
+  const handlePreset = (nextPreset: VisualPreset) => {
+    setPreset(nextPreset);
+    setFxIntensity(PRESETS[nextPreset].defaultIntensity);
+  };
+
+  if (!tracks.length) {
+    return (
+      <main className="app" style={gradientStyle}>
+        <section className="player-card empty-state" aria-live="polite">
+          <h1>Queue is empty</h1>
+          <p>Add audio files to start playback.</p>
+        </section>
+      </main>
+    );
+  }
+
   return (
     <main className="app" style={gradientStyle}>
       <div className="aurora aurora-a" />
       <div className="aurora aurora-b" />
       <section className="player-card">
         <header className="player-header">
-          <p className="eyebrow">Wow Web Music Player v2</p>
+          <p className="eyebrow">Wow Web Music Player v3</p>
           <h1>{currentTrack.title}</h1>
           <p>{currentTrack.artist}</p>
         </header>
 
         <canvas ref={canvasRef} className="visualizer" aria-label="Audio visualizer" />
         {!visualizerReady && <p className="fallback">Visualizer unavailable in this browser — audio controls still work.</p>}
+        {isTransitioning && <p className="loading-state" aria-live="polite">Loading next track…</p>}
 
         <div className="timeline">
           <span>{formatTime(progress)}</span>
@@ -627,11 +780,12 @@ function App() {
               setProgress(time);
               scheduleAutoCrossfade(queuePos);
             }}
+            aria-label="Track position"
           />
           <span>{formatTime(duration)}</span>
         </div>
 
-        <div className="controls">
+        <div className="controls" role="group" aria-label="Primary playback controls">
           <button onClick={() => void prevTrack()} aria-label="Previous track">
             ⏮
           </button>
@@ -641,6 +795,20 @@ function App() {
           <button onClick={() => void nextTrack()} aria-label="Next track">
             ⏭
           </button>
+        </div>
+
+        <div className="preset-row" role="group" aria-label="Visual presets">
+          {(Object.keys(PRESETS) as VisualPreset[]).map((key) => (
+            <button
+              key={key}
+              className={preset === key ? 'chip active' : 'chip'}
+              onClick={() => handlePreset(key)}
+              aria-pressed={preset === key}
+              aria-label={`Use ${PRESETS[key].label} preset`}
+            >
+              {PRESETS[key].label}
+            </button>
+          ))}
         </div>
 
         <div className="control-grid">
@@ -672,17 +840,17 @@ function App() {
         </div>
 
         <div className="mode-row" role="group" aria-label="Playback modes">
-          <button className={shuffle ? 'chip active' : 'chip'} onClick={toggleShuffle} aria-pressed={shuffle}>
+          <button className={shuffle ? 'chip active' : 'chip'} onClick={toggleShuffle} aria-pressed={shuffle} aria-label="Toggle shuffle mode">
             Shuffle {shuffle ? 'On' : 'Off'}
           </button>
           <button
             className="chip"
             onClick={() => setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))}
-            aria-label="Repeat mode"
+            aria-label="Toggle repeat mode"
           >
             Repeat: {repeatMode}
           </button>
-          <label className="chip fx-chip">
+          <label className="chip fx-chip" aria-label="Effect intensity selector">
             FX
             <select value={fxIntensity} onChange={(e) => setFxIntensity(e.target.value as FxIntensity)} aria-label="Effect intensity">
               <option value="low">low</option>
@@ -716,7 +884,7 @@ function App() {
           </ul>
         </section>
 
-        <footer className="shortcuts">
+        <footer className="shortcuts" aria-label="Keyboard shortcuts">
           <span>Space: play/pause</span>
           <span>←/→: seek ±5s</span>
           <span>N/P: next/prev</span>

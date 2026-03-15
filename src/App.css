@@ -11,16 +11,21 @@
   --fx-bass: 0;
   --fx-mid: 0;
   --fx-treble: 0;
+  --preset-a: #22d3ee;
+  --preset-b: #a855f7;
+  --preset-c: #38bdf8;
+  --motion-mult: 1;
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 1rem;
-  background: radial-gradient(circle at 15% 20%, rgba(103, 232, 249, calc(0.12 + var(--fx-bass) * 0.24)), transparent 45%),
-    radial-gradient(circle at 80% 10%, rgba(196, 132, 252, calc(0.16 + var(--fx-mid) * 0.24)), transparent 40%),
-    linear-gradient(120deg, #0b1020 0%, #1a0f2e 55%, #2a183f 100%);
+  background:
+    radial-gradient(circle at 15% 20%, color-mix(in oklab, var(--preset-a) 62%, transparent) calc(6% + var(--fx-bass) * 14%), transparent 45%),
+    radial-gradient(circle at 80% 10%, color-mix(in oklab, var(--preset-b) 58%, transparent) calc(8% + var(--fx-mid) * 16%), transparent 40%),
+    linear-gradient(120deg, #090f1f 0%, color-mix(in oklab, var(--preset-b) 18%, #1a0f2e) 55%, #2a183f 100%);
   overflow: hidden;
   position: relative;
-  transition: background 120ms linear;
+  transition: background 180ms ease;
 }
 
 .aurora {
@@ -29,8 +34,8 @@
   height: 50vw;
   border-radius: 999px;
   filter: blur(70px);
-  opacity: calc(0.26 + var(--fx-mid) * 0.22);
-  animation: drift 16s ease-in-out infinite;
+  opacity: calc(0.22 + var(--fx-mid) * 0.2);
+  animation: drift calc(18s / var(--motion-mult)) ease-in-out infinite;
   pointer-events: none;
   will-change: transform, opacity;
 }
@@ -38,16 +43,16 @@
 .aurora-a {
   top: -10vw;
   left: -10vw;
-  background: #22d3ee;
-  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-bass) * 0.16));
+  background: var(--preset-a);
+  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-bass) * 0.12));
 }
 
 .aurora-b {
   bottom: -15vw;
   right: -10vw;
   animation-delay: -8s;
-  background: #a855f7;
-  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-treble) * 0.16));
+  background: var(--preset-b);
+  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-treble) * 0.14));
 }
 
 @keyframes drift {
@@ -67,12 +72,18 @@
   backdrop-filter: blur(18px);
   border-radius: 28px;
   padding: clamp(1rem, 3vw, 2rem);
-  box-shadow: 0 20px calc(50px + var(--fx-bass) * 22px) rgba(0, 0, 0, 0.35), 0 0 calc(20px + var(--fx-treble) * 22px)
-    color-mix(in oklab, var(--track-accent) 35%, transparent);
+  box-shadow:
+    0 20px calc(50px + var(--fx-bass) * 18px) rgba(0, 0, 0, 0.35),
+    0 0 calc(18px + var(--fx-treble) * 18px) color-mix(in oklab, var(--track-accent) 35%, transparent);
   color: #f4f7ff;
   position: relative;
   z-index: 2;
-  transition: border-color 220ms ease, box-shadow 120ms linear;
+  transform: translateZ(0);
+  transition: border-color 220ms ease, box-shadow 160ms ease, transform 180ms ease;
+}
+
+.player-card:hover {
+  transform: translateY(-1px);
 }
 
 .player-card::before {
@@ -111,10 +122,29 @@
   border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.fallback {
+.fallback,
+.loading-state {
   margin: 0;
   font-size: 0.9rem;
+}
+
+.fallback {
   color: #f0b2ff;
+}
+
+.loading-state {
+  color: color-mix(in oklab, var(--preset-c) 78%, white 22%);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 .timeline {
@@ -146,7 +176,7 @@ input[type='range'] {
   height: 52px;
   font-size: 1.2rem;
   cursor: pointer;
-  transition: transform 160ms ease, background 160ms ease;
+  transition: transform 130ms ease, background 130ms ease;
 }
 
 .controls button:hover {
@@ -154,11 +184,24 @@ input[type='range'] {
   background: rgba(255, 255, 255, 0.2);
 }
 
+.controls button:active,
+.playlist button:active,
+.chip:active {
+  transform: scale(0.98);
+}
+
 .play-btn {
   width: 68px !important;
   height: 68px !important;
   font-size: 1.5rem !important;
   background: color-mix(in oklab, var(--track-accent) 38%, rgba(255, 255, 255, 0.18)) !important;
+}
+
+.preset-row {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.8rem 0;
+  flex-wrap: wrap;
 }
 
 .control-grid {
@@ -198,6 +241,7 @@ input[type='range'] {
   color: #eef3ff;
   font-size: 0.82rem;
   cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
 }
 
 .chip.active {
@@ -256,7 +300,11 @@ input[type='range'] {
   justify-content: space-between;
   align-items: center;
   gap: 1rem;
-  transition: border-color 180ms ease, background 180ms ease;
+  transition: border-color 180ms ease, background 180ms ease, transform 120ms ease;
+}
+
+.playlist button:hover {
+  background: rgba(14, 18, 36, 0.65);
 }
 
 .playlist button span {
@@ -276,6 +324,24 @@ input[type='range'] {
   gap: 0.8rem;
   font-size: 0.78rem;
   opacity: 0.8;
+}
+
+.empty-state {
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .aurora,
+  .loading-state {
+    animation: none;
+  }
+
+  .player-card,
+  .controls button,
+  .playlist button,
+  .chip {
+    transition: none;
+  }
 }
 
 @media (max-width: 600px) {
