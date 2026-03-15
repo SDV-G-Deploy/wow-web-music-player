@@ -1,16 +1,14 @@
-# Wow Web Music Player v3 🎧⚡
+# Wow Web Music Player v4 🎧⚡
 
 Showcase-grade web music player on **Vite + React + TypeScript**, optimized for **GitHub Pages**.
 
-- Gapless-ready dual-deck playback + crossfade compatibility
-- Adaptive loudness leveling (perceived loudness balancing, no hard compression)
-- Visual presets: **Neon / Calm / Club**
-- Persistent user settings in `localStorage`
-- Installable PWA + Media Session API support
+- Dual-deck playback with smooth crossfade
+- Upgraded loudness leveling with integrated-LUFS-style analysis (web-friendly, no heavy deps)
+- Visual preset editor + JSON export/import
+- Local music upload (multiple files, browser-only)
+- Persistent settings in `localStorage`
 
 ![Screenshot](./docs/screenshot.png)
-
-![Demo GIF](./docs/demo.gif)
 
 ---
 
@@ -20,38 +18,55 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
 
 ---
 
-## What’s new in v3
+## What’s new in v4
 
-### 1) Gapless + loudness leveling
-- Improved deck prewarming to minimize click/gap artifacts between tracks
-- Keeps compatibility with existing crossfade engine (0–8s)
-- Adds soft safety micro-ramp even with `crossfade=0` to reduce transition clicks
-- Per-track adaptive loudness compensation (light touch, no aggressive compression)
+### 1) Loudness leveling upgrade
+- Reworked loudness estimation to an integrated-LUFS-style approach with block gating (absolute + relative gate)
+- Per-track compensation target around `-16 LUFS` with safe gain limits
+- Keeps transition smoothness: crossfade ramps + micro-ramp safety for `crossfade=0`
+- Lightweight and web-native (Web Audio API only)
 
-### 2) Visual presets
-- Added 3 presets:
-  - **Neon** (balanced motion)
-  - **Calm** (gentler palette + lower default intensity)
-  - **Club** (high-energy palette + stronger default intensity)
-- Preset changes:
-  - palette colors
-  - background/aurora motion behavior
+### 2) Preset editor + JSON export/import
+- Preset editor for key visual parameters:
+  - palette (3 colors)
   - default FX intensity
+  - motion multiplier
+  - animation speed multiplier
+- Export presets to JSON (`wwmp-presets-v4.json`)
+- Import JSON back into the player
 
-### 3) Persistence + migration
-- Saved to `localStorage`:
-  - preset
-  - FX intensity
+### 3) Upload your own music (local-only)
+- `+ Add your music` button supports **multiple files**
+- Supported formats (browser/codec dependent):
+  - `.mp3`
+  - `.wav`
+  - `.ogg`
+  - `.m4a`
+- Files are never uploaded to server
+- Added local tracks join the same queue and work with existing features:
   - crossfade
-  - repeat mode
-  - volume
-- Includes safe fallback/migration behavior for users without v3 data yet
+  - repeat/shuffle
+  - visualizer
+  - Media Session API (where browser supports it)
+- Broken/unsupported files are skipped with readable status
 
-### 4) UX polishing
-- Added explicit loading state during track transitions
-- Added graceful empty queue state
-- Micro-animations tuned for responsiveness (with `prefers-reduced-motion` fallback)
-- Improved accessibility labels (`aria-label`) for key controls
+### 4) UX/stability polish
+- Added upload/progress status messages
+- Preserved existing visual style and mobile layout
+- Improved error handling around file validation/loading
+
+---
+
+## Privacy model
+
+Local tracks are processed **only in your browser**:
+- No backend upload
+- No cloud analysis
+- No server-side storage
+
+Notes:
+- Browser codec support varies by platform (especially `.m4a` and some `.ogg` variants)
+- Very large files may analyze more slowly on low-power devices
 
 ---
 
@@ -65,7 +80,8 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
 - 🔀 Shuffle
 - 🔁 Repeat mode cycle (`off → all → one`)
 - 🌈 Visual presets (`Neon / Calm / Club`)
-- ✨ Beat-reactive FX with intensity control
+- 🛠 Preset editor + export/import JSON
+- 📁 Local music upload (multiple)
 - ⌨️ Keyboard shortcuts:
   - `Space` — play/pause
   - `←/→` — seek ±5s
@@ -73,18 +89,6 @@ Showcase-grade web music player on **Vite + React + TypeScript**, optimized for 
   - `S` — shuffle on/off
   - `R` — repeat mode cycle
   - `M` — mute/unmute
-
----
-
-## Tech Stack
-
-- React 19
-- TypeScript
-- Vite 8
-- Web Audio API (analyser + gain staging + crossfade)
-- Media Session API
-- Service Worker + Web App Manifest
-- GitHub Actions (Pages deploy)
 
 ---
 
@@ -110,18 +114,6 @@ npm run preview
 
 ---
 
-## Demo audio generation
-
-Demo tracks are generated locally (copyright-safe synthesis):
-
-```bash
-npm run generate:audio
-```
-
-Script: `scripts/generate-demo-audio.mjs`
-
----
-
 ## Deployment (GitHub Pages)
 
 Workflow: `.github/workflows/deploy.yml`
@@ -129,8 +121,6 @@ Workflow: `.github/workflows/deploy.yml`
 1. Push to `main`
 2. GitHub Actions runs `npm ci` + `npm run build`
 3. Deploys `dist/` to GitHub Pages
-
-This project keeps GitHub Pages compatibility via dynamic Vite `base` in `vite.config.ts`.
 
 ---
 
