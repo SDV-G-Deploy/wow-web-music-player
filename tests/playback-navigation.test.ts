@@ -2,13 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   isLikelySupportedAudioInput,
+  isStalePlaybackOperation,
   mapPlaylistTracksToQueueIndexes,
   moveQueueByStep,
+  nextQueueOrderForNewTracks,
   queueIsCleared,
   queueNextPosition,
   queuePrevPosition,
   removeQueuePosition,
   reorderQueue,
+  shouldAutoplayAfterSwitch,
+  shouldReloadDeckTrack,
   shuffleKeepCurrent,
 } from '../src/playbackLogic';
 
@@ -76,4 +80,28 @@ test('isLikelySupportedAudioInput tolerates unknown mime from Android pickers', 
 test('queueIsCleared validates clear-queue state guard', () => {
   assert.equal(queueIsCleared([], 0, 0, 0, false), true);
   assert.equal(queueIsCleared([1], 0, 0, 0, false), false);
+});
+
+test('nextQueueOrderForNewTracks does not reuse stale indexes after clear/reload', () => {
+  assert.deepEqual(nextQueueOrderForNewTracks(3, 2), [3, 4]);
+  assert.deepEqual(nextQueueOrderForNewTracks(10, 0), []);
+});
+
+test('shouldReloadDeckTrack detects stale active source mismatch', () => {
+  assert.equal(shouldReloadDeckTrack(5, 5), false);
+  assert.equal(shouldReloadDeckTrack(5, 9), true);
+  assert.equal(shouldReloadDeckTrack(null, 0), true);
+});
+
+test('shouldAutoplayAfterSwitch models mobile autoplay guard', () => {
+  assert.equal(shouldAutoplayAfterSwitch(true, true, true), true);
+  assert.equal(shouldAutoplayAfterSwitch(true, false, true), false);
+  assert.equal(shouldAutoplayAfterSwitch(true, false, false), true);
+  assert.equal(shouldAutoplayAfterSwitch(false, true, false), false);
+});
+
+test('isStalePlaybackOperation rejects stale async operations', () => {
+  assert.equal(isStalePlaybackOperation(4, 4, 10, 10), false);
+  assert.equal(isStalePlaybackOperation(3, 4, 10, 10), true);
+  assert.equal(isStalePlaybackOperation(4, 4, 9, 10), true);
 });

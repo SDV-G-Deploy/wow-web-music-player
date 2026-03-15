@@ -71,3 +71,17 @@ export const isLikelySupportedAudioInput = (name: string, mimeType: string, acce
 
 export const queueIsCleared = (order: number[], queuePos: number, progress: number, duration: number, isPlaying: boolean) =>
   order.length === 0 && queuePos === 0 && progress === 0 && duration === 0 && !isPlaying;
+
+export const shouldReloadDeckTrack = (loadedTrackIndex: number | null, requestedTrackIndex: number) => loadedTrackIndex !== requestedTrackIndex;
+
+export const shouldAutoplayAfterSwitch = (wasPlaying: boolean, hasUserGestureUnlock: boolean, mobileStrictPolicy: boolean) => {
+  if (!wasPlaying) return false;
+  if (!mobileStrictPolicy) return true;
+  return hasUserGestureUnlock;
+};
+
+export const nextQueueOrderForNewTracks = (librarySizeBeforeAppend: number, appendedTracksCount: number) =>
+  Array.from({ length: Math.max(0, appendedTracksCount) }, (_, i) => librarySizeBeforeAppend + i);
+
+export const isStalePlaybackOperation = (requestSession: number, activeSession: number, requestOpId: number, activeOpId: number) =>
+  requestSession !== activeSession || requestOpId !== activeOpId;

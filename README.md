@@ -42,6 +42,12 @@ npm run preview
 - Toast-style status messages (`saved/imported/deleted/error`)
 - Mobile-first compact layout preserved
 
+### Android reliability hardening (follow-up)
+- Playback transitions guarded by session/op tokens to prevent stale async state writes
+- Deterministic queue reset flow after **Clear Queue** (full playback context reset)
+- Autoplay handoff robustness for Next/Prev on mobile autoplay-policy constraints
+- Visualizer quality switch: `off` / `light` / `full` (Android default `light`)
+
 ---
 
 ## Existing v4 features preserved
@@ -218,16 +224,33 @@ npm run build:debug # create debug APK
 - Picker MIME can be empty/`application/octet-stream`; app now validates by extension + MIME + decode probe.
 - Error now includes filename and MIME/type details to quickly spot broken files/codecs.
 
-3) **Visualizer lag on low-end devices**
-- Android defaults to **Visualizer safe mode ON** (lower FPS, fewer bars, capped pixel ratio).
-- You can toggle safe mode in advanced controls if your device is fast enough.
+3) **After Next/Prev playback sometimes does not start on Android**
+- Playback state-machine now uses operation/session guards to reject stale async transitions.
+- Android path now uses deterministic same-deck handoff (no risky deck swap autoplay race), with fallback if policy blocks secondary deck.
+- If playback was never user-started in this app session, Android WebView may still require one explicit Play tap (platform policy).
 
-4) **After Clear Queue UI looked frozen**
-- Clear queue now keeps controls visible/interactive and shows actionable empty-state guidance.
+4) **After Clear Queue + re-load old tracks could still play**
+- Clear Queue now performs full playback-context reset: active/standby deck sources, current index refs, transition ops/session, loudness cache, history.
+- Local object URLs from previous imports are revoked and local library is reset to demo-only baseline.
+- New imports build queue indexes from the current post-reset library only, so stale old tracks cannot be reused by accident.
 
-5) **Slow resume after backgrounding app**
-- Visualizer/progress/loudness loops now pause when app is hidden and resume cleanly on foreground.
+5) **Visualizer lag on Redmi / low-end Android devices**
+- Visualizer is now quality-profiled: `off` / `light` / `full`.
+- Android default = `light` (ultra-light profile: reduced bars, reduced FPS, DPR cap, throttled FX updates).
+- No React `setState` inside rAF for audio-energy cosmetics (CSS variables are updated directly).
+- Visual loops pause in background and resume only when app returns to foreground.
+
+6) **Slow resume after backgrounding app**
+- Visualizer/progress/loudness loops pause when app is hidden and resume cleanly on foreground.
 - AudioContext is suspended/resumed instead of full heavy reinit.
+
+---
+
+## Known Android constraints
+
+- WebView autoplay is still platform-controlled. First playback in a fresh app process may require one explicit user gesture.
+- `full` visualizer quality can be expensive on mid-range phones; prefer `light` for daily use.
+- Very large local libraries may increase memory pressure in WebView; add tracks in smaller batches if needed.
 
 ---
 

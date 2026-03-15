@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import {
+  isLikelySupportedAudioInput,
+  isStalePlaybackOperation,
+  nextQueueOrderForNewTracks,
+  queueIsCleared,
   queueNextPosition,
   queuePrevPosition,
   removeQueuePosition,
   reorderQueue,
+  shouldAutoplayAfterSwitch,
+  shouldReloadDeckTrack,
   shuffleKeepCurrent,
-  isLikelySupportedAudioInput,
-  queueIsCleared,
   type RepeatMode,
 } from './playbackLogic';
 
 type FxIntensity = 'low' | 'med' | 'high';
 type VisualPreset = 'neon' | 'calm' | 'club';
+type VisualizerQuality = 'off' | 'light' | 'full';
 
 type PresetConfig = {
   label: string;
@@ -87,6 +92,14 @@ const FX_MULTIPLIERS: Record<FxIntensity, number> = {
   med: 1,
   high: 1.45,
 };
+
+const VISUALIZER_PROFILES: Record<VisualizerQuality, { bars: number; fps: number; pixelRatio: number; fxTick: number }> = {
+  off: { bars: 0, fps: 0, pixelRatio: 1, fxTick: 0 },
+  light: { bars: 18, fps: 16, pixelRatio: 1, fxTick: 6 },
+  full: { bars: 56, fps: 42, pixelRatio: 1.8, fxTick: 3 },
+};
+
+const STALE_PLAYBACK_OP = 'STALE_PLAYBACK_OP';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -228,6 +241,7 @@ const estimateIntegratedLufs = (buffer: AudioBuffer) => {
 function App() {
   const initial = useMemo(() => loadSettings(), []);
 
+  const appRef = useRef<HTMLElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationRef = useRef<number | null>(null);
   const progressRafRef = useRef<number | null>(null);
@@ -241,6 +255,7 @@ function App() {
   const deckTrackRef = useRef<[number | null, number | null]>([null, null]);
   const activeDeckRef = useRef<0 | 1>(0);
   const currentTrackIndexRef = useRef(0);
+  const tracksRef = useRef<Track[]>(DEMO_TRACKS);
   const queuePosRef = useRef(0);
   const queueOrderRef = useRef<number[]>(DEMO_TRACKS.map((_, i) => i));
   const repeatModeRef = useRef<RepeatMode>(initial.repeat);
@@ -250,6 +265,11 @@ function App() {
   const loudnessMapRef = useRef<Record<number, number>>({});
   const loudnessPendingRef = useRef<Record<number, boolean>>({});
   const visualizerPausedByVisibilityRef = useRef(false);
+  const playbackSessionRef = useRef(1);
+  const playbackOpRef = useRef(0);
+  const playbackHistoryRef = useRef<number[]>([]);
+  const userGestureUnlockedRef = useRef(false);
+  const visualizerQualityRef = useRef<VisualizerQuality>(IS_ANDROID ? 'light' : 'full');
 
   const [tracks, setTracks] = useState<Track[]>(DEMO_TRACKS);
   const [queueOrder, setQueueOrder] = useState<number[]>(DEMO_TRACKS.map((_, i) => i));
@@ -273,15 +293,11 @@ function App() {
   const [preset, setPreset] = useState<VisualPreset>(initial.preset);
   const [presetConfigs, setPresetConfigs] = useState<Record<VisualPreset, PresetConfig>>(initial.presets);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [safeVisualizerMode, setSafeVisualizerMode] = useState(IS_ANDROID);
+  const [visualizerQuality, setVisualizerQuality] = useState<VisualizerQuality>(IS_ANDROID ? 'light' : 'full');
   const [draggedQueuePos, setDraggedQueuePos] = useState<number | null>(null);
   const [playlistName, setPlaylistName] = useState('');
   const [targetPlaylistId, setTargetPlaylistId] = useState('');
   const [userPlaylists, setUserPlaylists] = useState<UserPlaylist[]>(() => loadUserPlaylists());
-
-  const [bassLevel, setBassLevel] = useState(0);
-  const [midLevel, setMidLevel] = useState(0);
-  const [trebleLevel, setTrebleLevel] = useState(0);
 
   const currentTrackIndex = queueOrder[queuePos] ?? 0;
   const currentTrack = tracks[currentTrackIndex];
@@ -290,6 +306,10 @@ function App() {
   useEffect(() => {
     currentTrackIndexRef.current = currentTrackIndex;
   }, [currentTrackIndex]);
+
+  useEffect(() => {
+    tracksRef.current = tracks;
+  }, [tracks]);
 
   useEffect(() => {
     queuePosRef.current = queuePos;
@@ -314,6 +334,10 @@ function App() {
   useEffect(() => {
     isTransitioningRef.current = isTransitioning;
   }, [isTransitioning]);
+
+  useEffect(() => {
+    visualizerQualityRef.current = visualizerQuality;
+  }, [visualizerQuality]);
 
   useEffect(() => {
     const payload: PersistedSettings = {
@@ -353,23 +377,32 @@ function App() {
     () =>
       ({
         '--track-accent': currentTrack?.accent ?? '#67e8f9',
-        '--fx-bass': bassLevel.toFixed(4),
-        '--fx-mid': midLevel.toFixed(4),
-        '--fx-treble': trebleLevel.toFixed(4),
+        '--fx-bass': '0',
+        '--fx-mid': '0',
+        '--fx-treble': '0',
         '--preset-a': presetConfig.palette[0],
         '--preset-b': presetConfig.palette[1],
         '--preset-c': presetConfig.palette[2],
         '--motion-mult': String(presetConfig.motion),
         '--anim-mult': String(presetConfig.animation),
       }) as React.CSSProperties,
-    [currentTrack?.accent, bassLevel, midLevel, trebleLevel, presetConfig],
+    [currentTrack?.accent, presetConfig],
   );
+
+  const setFxLevels = (bass: number, mid: number, treble: number) => {
+    const host = appRef.current;
+    if (!host) return;
+    host.style.setProperty('--fx-bass', bass.toFixed(4));
+    host.style.setProperty('--fx-mid', mid.toFixed(4));
+    host.style.setProperty('--fx-treble', treble.toFixed(4));
+  };
 
   const stopVisualizer = () => {
     if (animationRef.current) {
       cancelAnimationFrame(animationRef.current);
       animationRef.current = null;
     }
+    setFxLevels(0, 0, 0);
   };
 
   const stopProgressLoop = () => {
@@ -392,6 +425,54 @@ function App() {
       loudnessTimerRef.current = null;
     }
   };
+
+
+  const invalidatePlaybackOps = () => {
+    playbackSessionRef.current += 1;
+    playbackOpRef.current += 1;
+  };
+
+  const throwIfStalePlaybackOp = (sessionId: number, opId: number) => {
+    if (isStalePlaybackOperation(sessionId, playbackSessionRef.current, opId, playbackOpRef.current)) {
+      throw new Error(STALE_PLAYBACK_OP);
+    }
+  };
+
+  const resetDeckElement = (deck: HTMLAudioElement) => {
+    deck.pause();
+    deck.currentTime = 0;
+    deck.removeAttribute('src');
+    deck.load();
+  };
+
+  const resetPlaybackContext = () => {
+    invalidatePlaybackOps();
+    clearCrossfadeTimer();
+    clearLoudnessTimer();
+    stopProgressLoop();
+    stopVisualizer();
+    decksRef.current.forEach(resetDeckElement);
+    deckTrackRef.current = [null, null];
+    activeDeckRef.current = 0;
+    playbackHistoryRef.current = [];
+    loudnessMapRef.current = {};
+    loudnessPendingRef.current = {};
+    setIsPlaying(false);
+    setIsTransitioning(false);
+    isPlayingRef.current = false;
+    isTransitioningRef.current = false;
+    setProgress(0);
+    setDuration(0);
+    currentTrackIndexRef.current = 0;
+
+    if (gainNodesRef.current.length >= 2) {
+      gainNodesRef.current[0].gain.value = 1;
+      gainNodesRef.current[1].gain.value = 0.001;
+    }
+  };
+
+  const isAutoplayPolicyError = (error: unknown) =>
+    error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError');
 
   const updateMediaSession = (trackIndex: number, playing: boolean) => {
     if (!('mediaSession' in navigator)) return;
@@ -521,7 +602,7 @@ function App() {
     const target = 0.2;
 
     loudnessTimerRef.current = window.setInterval(() => {
-      if (!isPlaying) return;
+      if (!isPlayingRef.current) return;
       analyser.getByteTimeDomainData(bins);
       let sum = 0;
       for (let i = 0; i < bins.length; i++) {
@@ -541,33 +622,40 @@ function App() {
   };
 
   const drawVisualizer = () => {
+    const quality = visualizerQualityRef.current;
+    const profile = VISUALIZER_PROFILES[quality];
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
-    if (!canvas || !analyser || document.hidden) return;
+
+    if (quality === 'off' || !canvas || !analyser || document.hidden) {
+      stopVisualizer();
+      return;
+    }
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    const bars = safeVisualizerMode ? 32 : 56;
-    const bucket = Math.max(1, Math.floor(bufferLength / bars));
     const smooth = { bass: 0, mid: 0, treble: 0 };
-    const fpsCap = safeVisualizerMode ? 24 : 42;
-    const frameGap = 1000 / fpsCap;
+    const frameGap = 1000 / profile.fps;
     let lastFrameAt = 0;
     let energyTick = 0;
 
     const render = (ts: number) => {
-      if (!canvasRef.current || !analyserRef.current || document.hidden || !isPlayingRef.current) return;
-      animationRef.current = requestAnimationFrame(render);
+      if (!canvasRef.current || !analyserRef.current || document.hidden || !isPlayingRef.current || visualizerQualityRef.current === 'off') {
+        stopVisualizer();
+        return;
+      }
 
+      animationRef.current = requestAnimationFrame(render);
       if (ts - lastFrameAt < frameGap) return;
       lastFrameAt = ts;
 
       const c = canvasRef.current;
       const a = analyserRef.current;
-      const pixelRatio = Math.min(safeVisualizerMode ? 1.2 : 1.8, window.devicePixelRatio || 1);
+      const activeProfile = VISUALIZER_PROFILES[visualizerQualityRef.current];
+      const pixelRatio = Math.min(activeProfile.pixelRatio, window.devicePixelRatio || 1);
       const width = c.clientWidth;
       const height = c.clientHeight;
       const expectedW = Math.floor(width * pixelRatio);
@@ -582,6 +670,8 @@ function App() {
       a.getByteFrequencyData(dataArray);
       ctx.clearRect(0, 0, width, height);
 
+      const bars = activeProfile.bars;
+      const bucket = Math.max(1, Math.floor(bufferLength / bars));
       const intensity = FX_MULTIPLIERS[fxIntensity] * presetConfig.motion;
       const barWidth = width / bars;
       const hueShift = ts * 0.014 * presetConfig.animation;
@@ -593,17 +683,17 @@ function App() {
         for (let j = start; j < end; j++) sum += dataArray[j];
         const avg = sum / Math.max(1, end - start);
         const value = Math.pow(avg / 255, 1.3);
-        const barHeight = value * height * (0.42 + intensity * 0.28);
+        const barHeight = value * height * (0.4 + intensity * 0.24);
         const x = i * barWidth;
         const y = height - barHeight;
 
         const hue = (i * 5 + hueShift) % 360;
-        ctx.fillStyle = `hsla(${hue}, 92%, 65%, ${0.24 + value * 0.58})`;
+        ctx.fillStyle = `hsla(${hue}, 92%, 65%, ${0.22 + value * 0.56})`;
         ctx.fillRect(x + 0.7, y, Math.max(1.3, barWidth - 1.8), barHeight);
       }
 
       energyTick += 1;
-      if (energyTick % 3 !== 0) return;
+      if (activeProfile.fxTick === 0 || energyTick % activeProfile.fxTick !== 0) return;
 
       const third = Math.floor(dataArray.length / 3);
       const getEnergy = (from: number, to: number) => {
@@ -620,9 +710,7 @@ function App() {
       smooth.mid = smooth.mid * 0.85 + midRaw * 0.15;
       smooth.treble = smooth.treble * 0.85 + trebleRaw * 0.15;
 
-      setBassLevel(Math.min(1.4, smooth.bass));
-      setMidLevel(Math.min(1.4, smooth.mid));
-      setTrebleLevel(Math.min(1.4, smooth.treble));
+      setFxLevels(Math.min(1.4, smooth.bass), Math.min(1.4, smooth.mid), Math.min(1.4, smooth.treble));
     };
 
     animationRef.current = requestAnimationFrame(render);
@@ -642,7 +730,7 @@ function App() {
     clearCrossfadeTimer();
     const activeDeck = decksRef.current[activeDeckRef.current];
     const remain = (activeDeck.duration || 0) - (activeDeck.currentTime || 0);
-    const nextPos = queueNextPosition(position, repeatModeRef.current, queueOrder.length);
+    const nextPos = queueNextPosition(position, repeatModeRef.current, queueOrderRef.current.length);
     const validNext = nextPos >= 0 && nextPos !== position;
     const fade = clampCrossfade(crossfadeSecRef.current);
 
@@ -653,13 +741,17 @@ function App() {
     }, Math.max(40, (remain - fade) * 1000));
   };
 
-  const prepareDeck = async (deckIndex: 0 | 1, trackIndex: number) => {
+  const prepareDeck = async (deckIndex: 0 | 1, trackIndex: number, guard?: { sessionId: number; opId: number }) => {
+    if (guard) throwIfStalePlaybackOp(guard.sessionId, guard.opId);
+
     const deck = decksRef.current[deckIndex];
     const track = tracks[trackIndex];
-    if (!track) return;
+    if (!track) throw new Error('Track not found for deck prepare');
 
     if (deckTrackRef.current[deckIndex] === trackIndex && deck.src) return;
 
+    deck.pause();
+    deck.currentTime = 0;
     deck.src = track.src;
     deck.load();
     deckTrackRef.current[deckIndex] = trackIndex;
@@ -684,46 +776,73 @@ function App() {
         deck.addEventListener('error', fail, { once: true });
       });
     }
+
+    if (guard) throwIfStalePlaybackOp(guard.sessionId, guard.opId);
   };
 
-  const prewarmNextDeck = async (fromPosition: number) => {
-    const nextPos = queueNextPosition(fromPosition, repeatModeRef.current, queueOrder.length);
+  const prewarmNextDeck = async (fromPosition: number, guard?: { sessionId: number; opId: number }) => {
+    if (IS_ANDROID) return;
+
+    const order = queueOrderRef.current;
+    const nextPos = queueNextPosition(fromPosition, repeatModeRef.current, order.length);
     if (nextPos < 0) return;
 
-    const nextTrackIndex = queueOrder[nextPos];
+    const nextTrackIndex = order[nextPos];
+    if (nextTrackIndex == null) return;
+
     const standby: 0 | 1 = activeDeckRef.current === 0 ? 1 : 0;
-    await prepareDeck(standby, nextTrackIndex);
+    try {
+      await prepareDeck(standby, nextTrackIndex, guard);
+    } catch {
+      // best-effort warmup only
+    }
   };
 
-  const transitionToPosition = async (nextPos: number, crossfade: boolean) => {
+  const transitionToPosition = async (nextPos: number, crossfade: boolean, trigger: 'user' | 'auto' = 'auto') => {
+    const order = queueOrderRef.current;
     if (isTransitioningRef.current) return;
-    if (nextPos < 0 || nextPos >= queueOrder.length) {
+    if (nextPos < 0 || nextPos >= order.length) {
       setIsPlaying(false);
       return;
     }
+
+    if (trigger === 'user') userGestureUnlockedRef.current = true;
+
+    if (!shouldAutoplayAfterSwitch(isPlayingRef.current, userGestureUnlockedRef.current, IS_ANDROID)) {
+      setQueuePos(nextPos);
+      queuePosRef.current = nextPos;
+      setProgress(0);
+      setDuration(0);
+      setIsPlaying(false);
+      return;
+    }
+
+    const sessionId = playbackSessionRef.current;
+    const opId = playbackOpRef.current + 1;
+    playbackOpRef.current = opId;
 
     isTransitioningRef.current = true;
     setIsTransitioning(true);
 
     try {
-      const nextTrackIndex = queueOrder[nextPos];
+      const nextTrackIndex = order[nextPos];
+      if (nextTrackIndex == null) throw new Error('Missing track in queue');
+
       const fromDeckIndex = activeDeckRef.current;
-      const toDeckIndex: 0 | 1 = fromDeckIndex === 0 ? 1 : 0;
+      const preferredDeck: 0 | 1 = IS_ANDROID ? fromDeckIndex : (fromDeckIndex === 0 ? 1 : 0);
+      let toDeckIndex: 0 | 1 = preferredDeck;
 
       const fromDeck = decksRef.current[fromDeckIndex];
-      const toDeck = decksRef.current[toDeckIndex];
-
       const canUseGraph = ensureAudioGraph();
       if (canUseGraph) await audioCtxRef.current?.resume();
 
-      await prepareDeck(toDeckIndex, nextTrackIndex);
+      await prepareDeck(toDeckIndex, nextTrackIndex, { sessionId, opId });
+      throwIfStalePlaybackOp(sessionId, opId);
 
+      let playbackDeckIndex: 0 | 1 = toDeckIndex;
+      let toDeck = decksRef.current[toDeckIndex];
       const fade = clampCrossfade(crossfadeSecRef.current);
-      const useCrossfade = crossfade && fade > 0 && !fromDeck.paused;
-
-      setQueuePos(nextPos);
-      setProgress(0);
-      setDuration(toDeck.duration || 0);
+      const useCrossfade = crossfade && fade > 0 && !fromDeck.paused && fromDeckIndex !== toDeckIndex;
 
       if (canUseGraph) {
         const ctx = audioCtxRef.current!;
@@ -741,72 +860,102 @@ function App() {
           fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
           fromGain.exponentialRampToValueAtTime(0.001, now + fade);
         } else {
-          toGain.setValueAtTime(0.001, now);
-          toGain.exponentialRampToValueAtTime(targetTo, now + 0.018);
-          fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
-          fromGain.exponentialRampToValueAtTime(0.001, now + 0.018);
+          toGain.setValueAtTime(targetTo, now);
+          fromGain.setValueAtTime(fromDeckIndex === toDeckIndex ? targetTo : 0.001, now);
         }
       }
 
-      await toDeck.play();
-      setIsPlaying(true);
+      try {
+        await toDeck.play();
+      } catch (error) {
+        if (!isAutoplayPolicyError(error) || fromDeckIndex === toDeckIndex) {
+          throw error;
+        }
 
-      if (useCrossfade) {
+        toDeckIndex = fromDeckIndex;
+        await prepareDeck(toDeckIndex, nextTrackIndex, { sessionId, opId });
+        throwIfStalePlaybackOp(sessionId, opId);
+
+        toDeck = decksRef.current[toDeckIndex];
+        await toDeck.play();
+        playbackDeckIndex = toDeckIndex;
+      }
+
+      throwIfStalePlaybackOp(sessionId, opId);
+
+      if (useCrossfade && playbackDeckIndex !== fromDeckIndex) {
         window.setTimeout(() => {
           fromDeck.pause();
           fromDeck.currentTime = 0;
         }, fade * 1000 + 40);
-      } else {
+      } else if (playbackDeckIndex !== fromDeckIndex) {
         fromDeck.pause();
         fromDeck.currentTime = 0;
       }
 
-      activeDeckRef.current = toDeckIndex;
+      activeDeckRef.current = playbackDeckIndex;
+      setQueuePos(nextPos);
+      queuePosRef.current = nextPos;
+      setProgress(0);
+      setDuration(toDeck.duration || 0);
+      setIsPlaying(true);
+      playbackHistoryRef.current = [...playbackHistoryRef.current.slice(-40), nextTrackIndex];
+
       stopProgressLoop();
       progressLoop();
-      drawVisualizer();
+      if (visualizerQualityRef.current !== 'off') drawVisualizer();
       startLoudnessMonitor();
       updateMediaSession(nextTrackIndex, true);
       scheduleAutoCrossfade(nextPos);
-      void prewarmNextDeck(nextPos);
-    } catch {
-      setIsPlaying(false);
-      updateMediaSession(currentTrackIndexRef.current, false);
+      void prewarmNextDeck(nextPos, { sessionId, opId });
+    } catch (error) {
+      if (!(error instanceof Error) || error.message !== STALE_PLAYBACK_OP) {
+        setIsPlaying(false);
+        updateMediaSession(currentTrackIndexRef.current, false);
+      }
     } finally {
-      isTransitioningRef.current = false;
-      setIsTransitioning(false);
+      if (!isStalePlaybackOperation(sessionId, playbackSessionRef.current, opId, playbackOpRef.current)) {
+        isTransitioningRef.current = false;
+        setIsTransitioning(false);
+      }
     }
   };
 
   const selectQueuePosition = async (position: number) => {
-    if (position < 0 || position >= queueOrder.length) return;
+    const order = queueOrderRef.current;
+    if (position < 0 || position >= order.length) return;
 
-    if (!isPlaying) {
+    if (!isPlayingRef.current) {
       setQueuePos(position);
+      queuePosRef.current = position;
       setProgress(0);
       setDuration(0);
-      updateMediaSession(queueOrder[position], false);
+      const trackIndex = order[position];
+      if (trackIndex != null) updateMediaSession(trackIndex, false);
       return;
     }
 
-    await transitionToPosition(position, true);
+    await transitionToPosition(position, true, 'user');
   };
 
   const nextTrack = async () => {
+    const order = queueOrderRef.current;
     const currentPos = queuePosRef.current;
-    const nextPos = queueNextPosition(currentPos, repeatModeRef.current, queueOrder.length);
+    const nextPos = queueNextPosition(currentPos, repeatModeRef.current, order.length);
     if (nextPos < 0) {
       setIsPlaying(false);
       return;
     }
     if (!isPlayingRef.current) {
       setQueuePos(nextPos);
+      queuePosRef.current = nextPos;
       setProgress(0);
       setDuration(0);
-      updateMediaSession(queueOrder[nextPos], false);
+      const trackIndex = order[nextPos];
+      if (trackIndex != null) updateMediaSession(trackIndex, false);
       return;
     }
-    await transitionToPosition(nextPos, true);
+    await transitionToPosition(nextPos, true, 'user');
   };
 
   const prevTrack = async () => {
@@ -817,7 +966,8 @@ function App() {
       return;
     }
 
-    const prevPos = queuePrevPosition(queuePosRef.current, repeatModeRef.current, queueOrder.length);
+    const order = queueOrderRef.current;
+    const prevPos = queuePrevPosition(queuePosRef.current, repeatModeRef.current, order.length);
     if (prevPos < 0) {
       activeDeck.currentTime = 0;
       setProgress(0);
@@ -826,13 +976,15 @@ function App() {
 
     if (!isPlayingRef.current) {
       setQueuePos(prevPos);
+      queuePosRef.current = prevPos;
       setProgress(0);
       setDuration(0);
-      updateMediaSession(queueOrder[prevPos], false);
+      const trackIndex = order[prevPos];
+      if (trackIndex != null) updateMediaSession(trackIndex, false);
       return;
     }
 
-    await transitionToPosition(prevPos, true);
+    await transitionToPosition(prevPos, true, 'user');
   };
 
   const togglePlay = async () => {
@@ -848,19 +1000,21 @@ function App() {
       return;
     }
 
+    userGestureUnlockedRef.current = true;
+
     const canUseGraph = ensureAudioGraph();
     if (canUseGraph) {
       await audioCtxRef.current?.resume();
       applyDeckGain(activeDeckRef.current);
     }
 
-    if (!activeDeck.src) {
+    if (shouldReloadDeckTrack(deckTrackRef.current[activeDeckRef.current], currentTrackIndexRef.current) || !activeDeck.src) {
       await prepareDeck(activeDeckRef.current, currentTrackIndexRef.current);
     }
 
     await activeDeck.play();
     setIsPlaying(true);
-    drawVisualizer();
+    if (visualizerQualityRef.current !== 'off') drawVisualizer();
     startLoudnessMonitor();
     stopProgressLoop();
     progressLoop();
@@ -939,7 +1093,12 @@ function App() {
     if (valid.length) {
       setTracks((prev) => {
         const next = [...prev, ...valid];
-        setQueueOrder((prevOrder) => [...prevOrder, ...valid.map((_, i) => prev.length + i)]);
+        const appendedIndexes = nextQueueOrderForNewTracks(prev.length, valid.length);
+        setQueueOrder((prevOrder) => {
+          const nextOrder = [...prevOrder, ...appendedIndexes];
+          queueOrderRef.current = nextOrder;
+          return nextOrder;
+        });
         return next;
       });
     }
@@ -995,9 +1154,9 @@ function App() {
       stopProgressLoop();
       clearCrossfadeTimer();
       clearLoudnessTimer();
-      deckA.pause();
-      deckB.pause();
-      tracks.forEach((t) => {
+      resetDeckElement(deckA);
+      resetDeckElement(deckB);
+      tracksRef.current.forEach((t) => {
         if (t.kind === 'local') URL.revokeObjectURL(t.src);
       });
       void audioCtxRef.current?.close();
@@ -1010,6 +1169,15 @@ function App() {
       deck.volume = volume;
     });
   }, [volume]);
+
+  useEffect(() => {
+    if (visualizerQuality === 'off') {
+      stopVisualizer();
+      return;
+    }
+    if (isPlayingRef.current) drawVisualizer();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualizerQuality]);
 
   useEffect(() => {
     if (!isPlaying) return;
@@ -1036,7 +1204,7 @@ function App() {
       if (visualizerPausedByVisibilityRef.current && isPlayingRef.current) {
         visualizerPausedByVisibilityRef.current = false;
         void audioCtxRef.current?.resume();
-        drawVisualizer();
+        if (visualizerQualityRef.current !== 'off') drawVisualizer();
         progressLoop();
         startLoudnessMonitor();
         scheduleAutoCrossfade(queuePosRef.current);
@@ -1103,12 +1271,18 @@ function App() {
 
   const moveQueuePosition = (from: number, to: number) => {
     if (from === to) return;
-    setQueueOrder((prev) => reorderQueue(prev, from, to));
+    setQueueOrder((prev) => {
+      const next = reorderQueue(prev, from, to);
+      queueOrderRef.current = next;
+      return next;
+    });
     setQueuePos((prevPos) => {
-      if (prevPos === from) return to;
-      if (from < prevPos && to >= prevPos) return prevPos - 1;
-      if (from > prevPos && to <= prevPos) return prevPos + 1;
-      return prevPos;
+      let nextPos = prevPos;
+      if (prevPos === from) nextPos = to;
+      else if (from < prevPos && to >= prevPos) nextPos = prevPos - 1;
+      else if (from > prevPos && to <= prevPos) nextPos = prevPos + 1;
+      queuePosRef.current = nextPos;
+      return nextPos;
     });
   };
 
@@ -1121,35 +1295,29 @@ function App() {
 
     const nextOrder = removeQueuePosition(queueOrder, position);
     setQueueOrder(nextOrder);
+    queueOrderRef.current = nextOrder;
 
     if (!nextOrder.length) {
-      decksRef.current.forEach((d) => {
-        d.pause();
-        d.currentTime = 0;
-      });
-      setIsPlaying(false);
+      resetPlaybackContext();
       setQueuePos(0);
-      setProgress(0);
-      setDuration(0);
+      queuePosRef.current = 0;
       showToast('Queue item removed. Queue is empty now.', 'warn');
       return;
     }
 
     const removedCurrent = position === queuePosRef.current;
-    setQueuePos((prev) => {
-      if (position < prev) return prev - 1;
-      if (position > prev) return prev;
-      return Math.min(prev, nextOrder.length - 1);
-    });
+    const currentPos = queuePosRef.current;
+    const nextPos = position < currentPos
+      ? currentPos - 1
+      : position > currentPos
+        ? currentPos
+        : Math.min(currentPos, nextOrder.length - 1);
+
+    setQueuePos(nextPos);
+    queuePosRef.current = nextPos;
 
     if (removedCurrent) {
-      decksRef.current.forEach((d) => {
-        d.pause();
-        d.currentTime = 0;
-      });
-      setIsPlaying(false);
-      setProgress(0);
-      setDuration(0);
+      resetPlaybackContext();
       showToast('Current track removed. Select a track and press Play.', 'warn');
       return;
     }
@@ -1160,21 +1328,23 @@ function App() {
   const clearQueue = () => {
     const ok = window.confirm('Clear full queue? This cannot be undone.');
     if (!ok) return;
-    decksRef.current.forEach((d) => {
-      d.pause();
-      d.currentTime = 0;
+
+    resetPlaybackContext();
+
+    tracks.forEach((t) => {
+      if (t.kind === 'local') URL.revokeObjectURL(t.src);
     });
-    stopVisualizer();
-    stopProgressLoop();
-    clearLoudnessTimer();
+
+    setTracks(DEMO_TRACKS);
     setQueueOrder([]);
+    queueOrderRef.current = [];
     setQueuePos(0);
-    setProgress(0);
-    setDuration(0);
-    setIsPlaying(false);
+    queuePosRef.current = 0;
+    setShuffle(false);
     setAdvancedOpen(true);
+    setUploadStatus('Queue cleared. Add new files to start fresh playback context.');
     console.assert(queueIsCleared([], 0, 0, 0, false), 'Queue clear state guard');
-    showToast('Queue cleared. You can add new files immediately.', 'warn');
+    showToast('Queue cleared. Old playback context removed.', 'warn');
   };
 
   const toggleShuffle = () => {
@@ -1182,14 +1352,18 @@ function App() {
       if (!prev) {
         const shuffled = shuffleKeepCurrent(queueOrder, currentTrackIndex);
         setQueueOrder(shuffled);
+        queueOrderRef.current = shuffled;
         setQueuePos(0);
+        queuePosRef.current = 0;
         return true;
       }
 
       const ordered = tracks.map((_, i) => i).filter((idx) => queueOrder.includes(idx));
       setQueueOrder(ordered);
+      queueOrderRef.current = ordered;
       const nextPos = ordered.indexOf(currentTrackIndexRef.current);
       setQueuePos(Math.max(0, nextPos));
+      queuePosRef.current = Math.max(0, nextPos);
       return false;
     });
   };
@@ -1272,8 +1446,11 @@ function App() {
       return;
     }
 
+    resetPlaybackContext();
     setQueueOrder(trackIndexes);
+    queueOrderRef.current = trackIndexes;
     setQueuePos(0);
+    queuePosRef.current = 0;
     setShuffle(false);
     showToast(`Playlist loaded (${trackIndexes.length} tracks).`);
   };
@@ -1380,7 +1557,7 @@ function App() {
   const isQueueEmpty = queueOrder.length === 0;
 
   return (
-    <main className="app" style={gradientStyle}>
+    <main ref={appRef} className="app" style={gradientStyle}>
       <div className="aurora aurora-a" />
       <div className="aurora aurora-b" />
       <div className="aurora aurora-c" />
@@ -1507,9 +1684,14 @@ function App() {
                 <option value="high">high</option>
               </select>
             </label>
-            <button className={safeVisualizerMode ? 'chip active' : 'chip'} onClick={() => setSafeVisualizerMode((v) => !v)} aria-pressed={safeVisualizerMode}>
-              Visualizer safe mode {safeVisualizerMode ? 'On' : 'Off'}
-            </button>
+            <label className="chip fx-chip" aria-label="Visualizer quality selector">
+              Visualizer
+              <select value={visualizerQuality} onChange={(e) => setVisualizerQuality(e.target.value as VisualizerQuality)}>
+                <option value="off">off</option>
+                <option value="light">light</option>
+                <option value="full">full</option>
+              </select>
+            </label>
           </div>
 
           <section className="preset-editor" aria-label="Preset editor">
