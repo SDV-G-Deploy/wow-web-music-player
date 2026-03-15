@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  isLikelySupportedAudioInput,
   mapPlaylistTracksToQueueIndexes,
   moveQueueByStep,
+  queueIsCleared,
   queueNextPosition,
   queuePrevPosition,
   removeQueuePosition,
@@ -62,4 +64,16 @@ test('mapPlaylistTracksToQueueIndexes resolves loadable tracks from library', ()
   ];
 
   assert.deepEqual(mapPlaylistTracksToQueueIndexes(playlist, library), [0, 2]);
+});
+
+test('isLikelySupportedAudioInput tolerates unknown mime from Android pickers', () => {
+  const ext = ['.mp3', '.wav', '.ogg', '.m4a'];
+  assert.equal(isLikelySupportedAudioInput('song.mp3', '', ext), true);
+  assert.equal(isLikelySupportedAudioInput('song.unknown', 'application/octet-stream', ext), true);
+  assert.equal(isLikelySupportedAudioInput('song.txt', 'text/plain', ext), false);
+});
+
+test('queueIsCleared validates clear-queue state guard', () => {
+  assert.equal(queueIsCleared([], 0, 0, 0, false), true);
+  assert.equal(queueIsCleared([1], 0, 0, 0, false), false);
 });

@@ -206,6 +206,29 @@ npm run sync        # rebuild web + sync into Android project
 npm run build:debug # create debug APK
 ```
 
+### Android troubleshooting
+
+1) **New debug APK doesn't install over previous build (conflict/package issue)**
+- Debug flavor now uses `applicationIdSuffix ".debug"` (`com.sdv.wowmusicplayer.debug`) to avoid collisions with release app.
+- For predictable debug-over-debug updates from CI, set repository secret `ANDROID_DEBUG_KEYSTORE_BASE64` (base64 of one stable debug keystore).
+- If old APK was signed with another key, Android will block update: uninstall old debug app once, then install new one.
+- Release APK and debug APK are different signing flows; they are not interchangeable updates.
+
+2) **MP3 shown as unsupported/unknown on Android picker**
+- Picker MIME can be empty/`application/octet-stream`; app now validates by extension + MIME + decode probe.
+- Error now includes filename and MIME/type details to quickly spot broken files/codecs.
+
+3) **Visualizer lag on low-end devices**
+- Android defaults to **Visualizer safe mode ON** (lower FPS, fewer bars, capped pixel ratio).
+- You can toggle safe mode in advanced controls if your device is fast enough.
+
+4) **After Clear Queue UI looked frozen**
+- Clear queue now keeps controls visible/interactive and shows actionable empty-state guidance.
+
+5) **Slow resume after backgrounding app**
+- Visualizer/progress/loudness loops now pause when app is hidden and resume cleanly on foreground.
+- AudioContext is suspended/resumed instead of full heavy reinit.
+
 ---
 
 ## Quality checks

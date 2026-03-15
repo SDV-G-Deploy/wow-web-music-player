@@ -63,7 +63,17 @@ android {
         }
     }
 
+    def stableDebugKeystore = rootProject.file('debug.keystore')
+
     signingConfigs {
+        if (stableDebugKeystore.exists()) {
+            debug {
+                storeFile stableDebugKeystore
+                storePassword 'android'
+                keyAlias 'androiddebugkey'
+                keyPassword 'android'
+            }
+        }
         if (hasReleaseSigning) {
             release {
                 storeFile file(releaseKeystorePath)
@@ -75,6 +85,12 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix ".debug"
+            if (stableDebugKeystore.exists()) {
+                signingConfig signingConfigs.debug
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'

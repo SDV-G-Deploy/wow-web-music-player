@@ -46,6 +46,15 @@ jobs:
         run: npm ci
         working-directory: android-app
 
+      - name: Prepare stable debug keystore (optional, for updatable debug installs)
+        run: |
+          if [ -n "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}" | base64 --decode > android-app/android/debug.keystore
+            echo "Using stable debug keystore from secret."
+          else
+            echo "No ANDROID_DEBUG_KEYSTORE_BASE64 secret: debug APK may not update over older CI debug builds signed with another key."
+          fi
+
       - name: Build web + sync Capacitor Android project
         run: npm run sync
         working-directory: android-app

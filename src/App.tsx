@@ -6,6 +6,8 @@ import {
   removeQueuePosition,
   reorderQueue,
   shuffleKeepCurrent,
+  isLikelySupportedAudioInput,
+  queueIsCleared,
   type RepeatMode,
 } from './playbackLogic';
 
@@ -77,6 +79,8 @@ const DEFAULT_PRESETS: Record<VisualPreset, PresetConfig> = {
 const STORAGE_KEY = 'wwmp-settings-v4';
 const PLAYLIST_STORAGE_KEY = 'wwmp-user-playlists-v1';
 const ACCEPTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a'];
+const ACCEPTED_MIME_HINTS = ['audio/mpeg', 'audio/mp3', 'audio/wav', 'audio/x-wav', 'audio/wave', 'audio/ogg', 'audio/mp4', 'audio/x-m4a'];
+const IS_ANDROID = /android/i.test(navigator.userAgent) || (window as Window & { Capacitor?: { getPlatform?: () => string } }).Capacitor?.getPlatform?.() === 'android';
 
 const FX_MULTIPLIERS: Record<FxIntensity, number> = {
   low: 0.55,
@@ -245,6 +249,7 @@ function App() {
   const loudnessTimerRef = useRef<number | null>(null);
   const loudnessMapRef = useRef<Record<number, number>>({});
   const loudnessPendingRef = useRef<Record<number, boolean>>({});
+  const visualizerPausedByVisibilityRef = useRef(false);
 
   const [tracks, setTracks] = useState<Track[]>(DEMO_TRACKS);
   const [queueOrder, setQueueOrder] = useState<number[]>(DEMO_TRACKS.map((_, i) => i));
@@ -268,6 +273,7 @@ function App() {
   const [preset, setPreset] = useState<VisualPreset>(initial.preset);
   const [presetConfigs, setPresetConfigs] = useState<Record<VisualPreset, PresetConfig>>(initial.presets);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [safeVisualizerMode, setSafeVisualizerMode] = useState(IS_ANDROID);
   const [draggedQueuePos, setDraggedQueuePos] = useState<number | null>(null);
   const [playlistName, setPlaylistName] = useState('');
   const [targetPlaylistId, setTargetPlaylistId] = useState('');
@@ -537,22 +543,31 @@ function App() {
   const drawVisualizer = () => {
     const canvas = canvasRef.current;
     const analyser = analyserRef.current;
-    if (!canvas || !analyser) return;
+    if (!canvas || !analyser || document.hidden) return;
 
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     const bufferLength = analyser.frequencyBinCount;
     const dataArray = new Uint8Array(bufferLength);
-    const bars = 56;
+    const bars = safeVisualizerMode ? 32 : 56;
     const bucket = Math.max(1, Math.floor(bufferLength / bars));
     const smooth = { bass: 0, mid: 0, treble: 0 };
+    const fpsCap = safeVisualizerMode ? 24 : 42;
+    const frameGap = 1000 / fpsCap;
+    let lastFrameAt = 0;
+    let energyTick = 0;
 
-    const render = () => {
-      if (!canvasRef.current || !analyserRef.current) return;
+    const render = (ts: number) => {
+      if (!canvasRef.current || !analyserRef.current || document.hidden || !isPlayingRef.current) return;
+      animationRef.current = requestAnimationFrame(render);
+
+      if (ts - lastFrameAt < frameGap) return;
+      lastFrameAt = ts;
+
       const c = canvasRef.current;
       const a = analyserRef.current;
-      const pixelRatio = window.devicePixelRatio || 1;
+      const pixelRatio = Math.min(safeVisualizerMode ? 1.2 : 1.8, window.devicePixelRatio || 1);
       const width = c.clientWidth;
       const height = c.clientHeight;
       const expectedW = Math.floor(width * pixelRatio);
@@ -569,7 +584,7 @@ function App() {
 
       const intensity = FX_MULTIPLIERS[fxIntensity] * presetConfig.motion;
       const barWidth = width / bars;
-      const hueShift = performance.now() * 0.014 * presetConfig.animation;
+      const hueShift = ts * 0.014 * presetConfig.animation;
 
       for (let i = 0; i < bars; i++) {
         let sum = 0;
@@ -586,6 +601,9 @@ function App() {
         ctx.fillStyle = `hsla(${hue}, 92%, 65%, ${0.24 + value * 0.58})`;
         ctx.fillRect(x + 0.7, y, Math.max(1.3, barWidth - 1.8), barHeight);
       }
+
+      energyTick += 1;
+      if (energyTick % 3 !== 0) return;
 
       const third = Math.floor(dataArray.length / 3);
       const getEnergy = (from: number, to: number) => {
@@ -605,11 +623,9 @@ function App() {
       setBassLevel(Math.min(1.4, smooth.bass));
       setMidLevel(Math.min(1.4, smooth.mid));
       setTrebleLevel(Math.min(1.4, smooth.treble));
-
-      animationRef.current = requestAnimationFrame(render);
     };
 
-    render();
+    animationRef.current = requestAnimationFrame(render);
   };
 
   const progressLoop = () => {
@@ -862,12 +878,19 @@ function App() {
 
   const validateAudioFile = async (file: File) => {
     const ext = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`;
-    if (!ACCEPTED_EXTENSIONS.includes(ext)) {
-      throw new Error(`Unsupported format: ${file.name}`);
+    const mime = (file.type || '').toLowerCase();
+    if (!isLikelySupportedAudioInput(file.name, mime, ACCEPTED_EXTENSIONS)) {
+      throw new Error(`Unsupported file: ${file.name} (type: ${file.type || 'unknown'})`);
+    }
+
+    const probe = new Audio();
+    const canPlayByMime = !!mime && probe.canPlayType(mime).replace('no', '').trim().length > 0;
+    const canPlayByExt = ACCEPTED_MIME_HINTS.some((hint) => probe.canPlayType(hint).replace('no', '').trim().length > 0);
+    if (!canPlayByMime && !canPlayByExt && !ACCEPTED_EXTENSIONS.includes(ext)) {
+      throw new Error(`Unsupported audio codec: ${file.name} (type: ${file.type || 'unknown'})`);
     }
 
     await new Promise<void>((resolve, reject) => {
-      const probe = new Audio();
       const url = URL.createObjectURL(file);
       const cleanup = () => {
         probe.src = '';
@@ -880,7 +903,7 @@ function App() {
       };
       probe.onerror = () => {
         cleanup();
-        reject(new Error(`Broken or unsupported file: ${file.name}`));
+        reject(new Error(`Cannot decode audio: ${file.name} (type: ${file.type || 'unknown'})`));
       };
       probe.src = url;
     });
@@ -1000,6 +1023,36 @@ function App() {
   }, [currentTrackIndex, isPlaying]);
 
   useEffect(() => {
+    const onVisibility = () => {
+      if (document.hidden) {
+        stopVisualizer();
+        stopProgressLoop();
+        clearLoudnessTimer();
+        visualizerPausedByVisibilityRef.current = true;
+        void audioCtxRef.current?.suspend();
+        return;
+      }
+
+      if (visualizerPausedByVisibilityRef.current && isPlayingRef.current) {
+        visualizerPausedByVisibilityRef.current = false;
+        void audioCtxRef.current?.resume();
+        drawVisualizer();
+        progressLoop();
+        startLoudnessMonitor();
+        scheduleAutoCrossfade(queuePosRef.current);
+      }
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', onVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', onVisibility);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'SELECT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
 
@@ -1111,12 +1164,17 @@ function App() {
       d.pause();
       d.currentTime = 0;
     });
+    stopVisualizer();
+    stopProgressLoop();
+    clearLoudnessTimer();
     setQueueOrder([]);
     setQueuePos(0);
     setProgress(0);
     setDuration(0);
     setIsPlaying(false);
-    showToast('Queue cleared.', 'warn');
+    setAdvancedOpen(true);
+    console.assert(queueIsCleared([], 0, 0, 0, false), 'Queue clear state guard');
+    showToast('Queue cleared. You can add new files immediately.', 'warn');
   };
 
   const toggleShuffle = () => {
@@ -1319,16 +1377,7 @@ function App() {
     }
   };
 
-  if (!queueOrder.length) {
-    return (
-      <main className="app" style={gradientStyle}>
-        <section className="player-card empty-state" aria-live="polite">
-          <h1>Queue is empty</h1>
-          <p>Add audio files or load one of your playlists.</p>
-        </section>
-      </main>
-    );
-  }
+  const isQueueEmpty = queueOrder.length === 0;
 
   return (
     <main className="app" style={gradientStyle}>
@@ -1338,8 +1387,8 @@ function App() {
       <section className="player-card">
         <header className="player-header">
           <p className="eyebrow">Wow Web Music Player v5</p>
-          <h1>{currentTrack?.title ?? 'No track'}</h1>
-          <p>{currentTrack?.artist ?? '—'}</p>
+          <h1>{isQueueEmpty ? 'Queue is empty' : (currentTrack?.title ?? 'No track')}</h1>
+          <p>{isQueueEmpty ? 'Add audio files or load playlist below.' : (currentTrack?.artist ?? '—')}</p>
         </header>
 
         <canvas ref={canvasRef} className="visualizer" aria-label="Audio visualizer" />
@@ -1356,7 +1405,9 @@ function App() {
             max={duration || 0}
             step={0.01}
             value={Math.min(progress, duration || progress || 0)}
+            disabled={isQueueEmpty}
             onChange={(e) => {
+              if (isQueueEmpty) return;
               const deck = decksRef.current[activeDeckRef.current];
               const time = Number(e.target.value);
               deck.currentTime = time;
@@ -1369,11 +1420,11 @@ function App() {
         </div>
 
         <div className="controls" role="group" aria-label="Primary playback controls">
-          <button onClick={() => void prevTrack()} aria-label="Previous track">⏮</button>
-          <button className="play-btn" onClick={() => void togglePlay()} aria-label={isPlaying ? 'Pause' : 'Play'}>
+          <button onClick={() => void prevTrack()} aria-label="Previous track" disabled={isQueueEmpty}>⏮</button>
+          <button className="play-btn" onClick={() => void togglePlay()} aria-label={isPlaying ? 'Pause' : 'Play'} disabled={isQueueEmpty}>
             {isPlaying ? '⏸' : '▶'}
           </button>
-          <button onClick={() => void nextTrack()} aria-label="Next track">⏭</button>
+          <button onClick={() => void nextTrack()} aria-label="Next track" disabled={isQueueEmpty}>⏭</button>
         </div>
 
         <div className="preset-row" role="group" aria-label="Visual presets">
@@ -1456,6 +1507,9 @@ function App() {
                 <option value="high">high</option>
               </select>
             </label>
+            <button className={safeVisualizerMode ? 'chip active' : 'chip'} onClick={() => setSafeVisualizerMode((v) => !v)} aria-pressed={safeVisualizerMode}>
+              Visualizer safe mode {safeVisualizerMode ? 'On' : 'Off'}
+            </button>
           </div>
 
           <section className="preset-editor" aria-label="Preset editor">
@@ -1527,7 +1581,7 @@ function App() {
           <section className="queue-box" aria-label="Queue order">
             <div className="queue-header-row">
               <p className="queue-title">Queue ({shuffle ? 'shuffled' : 'ordered'})</p>
-              <button className="chip danger" onClick={clearQueue}>Clear queue</button>
+              <button className="chip danger" onClick={clearQueue} disabled={isQueueEmpty}>Clear queue</button>
             </div>
             <div className="queue-playlist-tools">
               <select
@@ -1544,6 +1598,7 @@ function App() {
               <span>Use +PL on any queue row</span>
             </div>
             <ul className="playlist">
+              {isQueueEmpty ? <li><button disabled><strong>Queue is empty</strong><span>Add files with + Add your music</span></button></li> : null}
               {queueOrder.map((trackIndex, position) => {
                 const track = tracks[trackIndex];
                 if (!track) return null;

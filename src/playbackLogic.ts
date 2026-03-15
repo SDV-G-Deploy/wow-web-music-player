@@ -61,3 +61,13 @@ export const mapPlaylistTracksToQueueIndexes = (playlistTracks: PlaylistTrackRef
       libraryTracks.findIndex((t) => t.id === saved.id || (t.kind === saved.kind && t.title === saved.title && t.artist === saved.artist)),
     )
     .filter((idx) => idx >= 0);
+
+export const isLikelySupportedAudioInput = (name: string, mimeType: string, acceptedExtensions: string[]) => {
+  const ext = `.${name.split('.').pop()?.toLowerCase() ?? ''}`;
+  const mime = (mimeType || '').toLowerCase();
+  const mimeLooksAudio = mime.startsWith('audio/') || mime === 'application/octet-stream' || mime === '';
+  return acceptedExtensions.includes(ext) || mimeLooksAudio;
+};
+
+export const queueIsCleared = (order: number[], queuePos: number, progress: number, duration: number, isPlaying: boolean) =>
+  order.length === 0 && queuePos === 0 && progress === 0 && duration === 0 && !isPlaying;
