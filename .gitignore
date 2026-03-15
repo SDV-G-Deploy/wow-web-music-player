@@ -9,6 +9,10 @@ lerna-debug.log*
 
 node_modules
 dist
+android-app/www
+android-app/android/.gradle
+android-app/android/build
+android-app/android/app/build
 dist-ssr
 *.local
 

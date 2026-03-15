@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Wow Music Player</string>
+    <string name="title_activity_main">Wow Music Player</string>
+    <string name="package_name">com.sdv.wowmusicplayer</string>
+    <string name="custom_url_scheme">com.sdv.wowmusicplayer</string>
+</resources>

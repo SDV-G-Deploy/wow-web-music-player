@@ -1,0 +1,17 @@
+{
+  "name": "wow-web-music-player-android",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Capacitor Android wrapper for wow-web-music-player",
+  "scripts": {
+    "prepare:web": "node scripts/prepare-web.mjs",
+    "sync": "npm run prepare:web && npx cap sync android",
+    "open": "npm run sync && npx cap open android",
+    "build:debug": "npm run sync && cd android && ./gradlew assembleDebug"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.2.0",
+    "@capacitor/cli": "^8.2.0",
+    "@capacitor/core": "^8.2.0"
+  }
+}

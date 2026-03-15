@@ -72,6 +72,69 @@ Push to `main` → workflow `.github/workflows/deploy.yml` builds and publishes 
 
 ---
 
+## Android app (offline local files) 📱
+
+A dedicated Capacitor Android wrapper lives in **`android-app/`**.
+It packages the same web UI into a native Android app and supports offline playback from phone files.
+
+### What works offline
+
+- Pick local audio files from Android storage using the system picker (SAF / `ACTION_OPEN_DOCUMENT` via `<input type="file">` in WebView)
+- Build queue/playlist from selected files
+- Playback without internet (play/pause, next/prev, seek, volume)
+
+### Permissions model (Android)
+
+- File selection is done through Android SAF picker, so **no broad storage permission is required** for normal flow.
+- Existing manifest keeps only `INTERNET` (safe default for embedded web runtime).
+- UX stays clean: user taps **"+ Add your music"** and chooses files directly.
+
+### Build debug APK (Linux/macOS)
+
+Prerequisites:
+- Node.js 20+
+- Java 21 (or compatible JDK supported by current Android Gradle plugin)
+- Android SDK + `ANDROID_HOME` (for local builds)
+
+From repo root:
+
+```bash
+npm ci || npm install
+cd android-app
+npm ci || npm install
+npm run build:debug
+```
+
+APK output:
+
+```text
+android-app/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+### Install to phone
+
+Using ADB:
+
+```bash
+adb install -r android-app/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+Or manually:
+1. Copy `app-debug.apk` to phone
+2. Open it in file manager
+3. Allow installation from unknown sources (one-time)
+4. Install
+
+### Daily Android workflow for developers
+
+```bash
+cd android-app
+npm run sync        # rebuild web + sync into Android project
+npm run build:debug # create debug APK
+```
+
+---
+
 ## Quality checks
 
 ```bash

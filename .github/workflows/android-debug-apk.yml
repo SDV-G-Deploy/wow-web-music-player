@@ -1,0 +1,57 @@
+name: Android Debug APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'src/**'
+      - 'public/**'
+      - 'android-app/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'vite.config.ts'
+      - 'tsconfig*.json'
+      - '.github/workflows/android-debug-apk.yml'
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install android-app dependencies
+        run: npm ci
+        working-directory: android-app
+
+      - name: Build web + sync Capacitor Android project
+        run: npm run sync
+        working-directory: android-app
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+        working-directory: android-app/android
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-web-music-player-debug-apk
+          path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
