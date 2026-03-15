@@ -72,7 +72,7 @@ class PlaybackSessionRestorePolicyTest {
             title = "track-$id",
             artist = "artist",
             durationMs = 1000L,
-            uri = Uri.parse("content://tracks/$id")
+            uri = Uri.EMPTY
         )
     }
 }

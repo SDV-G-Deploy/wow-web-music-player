@@ -65,7 +65,7 @@ class PlaylistMutationsTest {
         val updated = PlaylistMutations.removeTrack(
             current = listOf(target, other),
             playlistId = "target",
-            trackIdentityKey = "1|content://tracks/1",
+            trackIdentityKey = "1|",
             nowMs = 99L
         )
 
@@ -84,7 +84,7 @@ class PlaylistMutationsTest {
             title = "t$id",
             artist = "artist",
             durationMs = 1_000L,
-            uri = Uri.parse("content://tracks/$id")
+            uri = Uri.EMPTY
         )
     }
 }
