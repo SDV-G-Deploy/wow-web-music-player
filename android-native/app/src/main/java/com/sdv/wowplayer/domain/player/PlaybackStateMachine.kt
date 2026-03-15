@@ -17,7 +17,9 @@ data class PlaybackMachineState<T>(
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
     val controllerConnected: Boolean = false,
-    val errorReason: PlaybackErrorReason? = null
+    val errorReason: PlaybackErrorReason? = null,
+    val repeatMode: RepeatModeSetting = RepeatModeSetting.OFF,
+    val shuffleEnabled: Boolean = false
 )
 
 sealed interface PlaybackEvent<T> {
@@ -36,7 +38,9 @@ sealed interface PlaybackEvent<T> {
         val isPlaying: Boolean,
         val status: PlaybackStatus,
         val positionMs: Long,
-        val durationMs: Long
+        val durationMs: Long,
+        val repeatMode: RepeatModeSetting,
+        val shuffleEnabled: Boolean
     ) : PlaybackEvent<T>
 
     data class Error<T>(val reason: PlaybackErrorReason) : PlaybackEvent<T>
@@ -118,7 +122,9 @@ class PlaybackStateMachine<T> {
                     status = event.status,
                     positionMs = event.positionMs.coerceAtLeast(0L),
                     durationMs = event.durationMs.coerceAtLeast(0L),
-                    controllerConnected = true
+                    controllerConnected = true,
+                    repeatMode = event.repeatMode,
+                    shuffleEnabled = event.shuffleEnabled
                 )
             }
 

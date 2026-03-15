@@ -1,8 +1,22 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+val releaseKeystorePath = System.getenv("WOW_ANDROID_KEYSTORE_PATH")
+val releaseKeystorePassword = System.getenv("WOW_ANDROID_KEYSTORE_PASSWORD")
+val releaseKeyAlias = System.getenv("WOW_ANDROID_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("WOW_ANDROID_KEY_PASSWORD")
+
+val hasReleaseSigningEnv = listOf(
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.sdv.wowplayer"
@@ -12,15 +26,29 @@ android {
         applicationId = "com.sdv.wowplayer"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 3
+        versionName = "0.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        create("release") {
+            if (hasReleaseSigningEnv) {
+                storeFile = file(requireNotNull(releaseKeystorePath))
+                storePassword = releaseKeystorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseSigningEnv) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -78,4 +106,41 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+}
+
+tasks.register("verifyReleaseSigningEnv") {
+    group = "verification"
+    description = "Fails fast when release signing env vars are missing"
+
+    doLast {
+        val required = mapOf(
+            "WOW_ANDROID_KEYSTORE_PATH" to System.getenv("WOW_ANDROID_KEYSTORE_PATH"),
+            "WOW_ANDROID_KEYSTORE_PASSWORD" to System.getenv("WOW_ANDROID_KEYSTORE_PASSWORD"),
+            "WOW_ANDROID_KEY_ALIAS" to System.getenv("WOW_ANDROID_KEY_ALIAS"),
+            "WOW_ANDROID_KEY_PASSWORD" to System.getenv("WOW_ANDROID_KEY_PASSWORD")
+        )
+
+        val missing = required
+            .filterValues { it.isNullOrBlank() }
+            .keys
+            .toList()
+
+        if (missing.isNotEmpty()) {
+            throw GradleException(
+                "Missing release signing environment variables: ${missing.joinToString(", ")}. " +
+                    "Configure them in CI/local shell before running release tasks."
+            )
+        }
+
+        val keystorePath = required.getValue("WOW_ANDROID_KEYSTORE_PATH")
+        if (!File(keystorePath).exists()) {
+            throw GradleException("Keystore file not found at WOW_ANDROID_KEYSTORE_PATH=$keystorePath")
+        }
+    }
+}
+
+tasks.matching { task ->
+    task.name in setOf("assembleRelease", "bundleRelease", "packageRelease")
+}.configureEach {
+    dependsOn("verifyReleaseSigningEnv")
 }

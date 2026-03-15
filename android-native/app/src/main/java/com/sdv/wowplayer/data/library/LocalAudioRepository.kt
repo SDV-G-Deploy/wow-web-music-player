@@ -10,6 +10,7 @@ import android.util.Log
 import com.sdv.wowplayer.core.model.Track
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 class LocalAudioRepository(
     private val context: Context
@@ -106,6 +107,24 @@ class LocalAudioRepository(
             0L
         } finally {
             retriever.release()
+        }
+    }
+
+    fun isTrackAvailable(track: Track): Boolean {
+        val uri = track.uri
+        return when (uri.scheme?.lowercase()) {
+            "content" -> {
+                runCatching {
+                    context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false
+                }.getOrElse { false }
+            }
+
+            "file" -> {
+                val path = uri.path ?: return false
+                File(path).exists()
+            }
+
+            else -> false
         }
     }
 

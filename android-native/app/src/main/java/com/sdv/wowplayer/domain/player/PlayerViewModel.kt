@@ -13,12 +13,19 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import com.sdv.wowplayer.core.model.TRACK_EXTRA_DURATION_MS
+import com.sdv.wowplayer.core.model.TRACK_EXTRA_URI
 import com.sdv.wowplayer.core.model.Track
 import com.sdv.wowplayer.core.model.toMediaItem
 import com.sdv.wowplayer.data.library.LocalAudioRepository
+import com.sdv.wowplayer.data.persistence.PlaybackSessionStore
+import com.sdv.wowplayer.data.persistence.PlaylistStore
 import com.sdv.wowplayer.domain.library.GetMediaStoreTracksUseCase
 import com.sdv.wowplayer.domain.library.GetSafTracksUseCase
+import com.sdv.wowplayer.domain.playlist.PlaylistMutations
+import com.sdv.wowplayer.domain.playlist.UserPlaylist
 import com.sdv.wowplayer.service.WowPlaybackService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -29,6 +36,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 @UnstableApi
 class PlayerViewModel(
@@ -36,6 +44,9 @@ class PlayerViewModel(
 ) : AndroidViewModel(application), Player.Listener {
 
     private val repository = LocalAudioRepository(application.applicationContext)
+    private val playlistStore = PlaylistStore(application.applicationContext)
+    private val sessionStore = PlaybackSessionStore(application.applicationContext)
+
     private val getMediaStoreTracks = GetMediaStoreTracksUseCase(repository)
     private val getSafTracks = GetSafTracksUseCase(repository)
 
@@ -54,7 +65,12 @@ class PlayerViewModel(
 
     private var positionTicker: Job? = null
     private var commandProcessor: Job? = null
+    private var persistSessionJob: Job? = null
     private var isPlayerScreenVisible = false
+
+    private var sessionRestoreAttempted = false
+    private var isHydratingSession = false
+    private var lastPersistedSession: PlaybackSessionSnapshot? = null
 
     private var lastLoggedErrorSignature: String? = null
     private var lastLoggedErrorAtMs: Long = 0L
@@ -63,6 +79,7 @@ class PlayerViewModel(
         startCommandProcessor()
         connectControllerIfNeeded()
         startPositionTicker()
+        loadPersistedPlaylists()
     }
 
     fun onHostStarted() {
@@ -80,13 +97,20 @@ class PlayerViewModel(
 
     fun loadMediaStoreLibrary() {
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoadingLibrary = true, errorMessage = null) }
+            _uiState.update {
+                it.copy(
+                    isLoadingLibrary = true,
+                    libraryErrorMessage = null,
+                    errorMessage = null
+                )
+            }
             getMediaStoreTracks()
                 .onSuccess { tracks ->
                     _uiState.update {
                         it.copy(
                             libraryTracks = tracks,
                             isLoadingLibrary = false,
+                            libraryErrorMessage = null,
                             errorMessage = null
                         )
                     }
@@ -96,11 +120,16 @@ class PlayerViewModel(
                     _uiState.update {
                         it.copy(
                             isLoadingLibrary = false,
+                            libraryErrorMessage = "Не удалось прочитать MediaStore",
                             errorMessage = "Не удалось прочитать MediaStore"
                         )
                     }
                 }
         }
+    }
+
+    fun clearLibraryError() {
+        _uiState.update { it.copy(libraryErrorMessage = null) }
     }
 
     fun addSafTracks(uris: List<Uri>) {
@@ -148,6 +177,112 @@ class PlayerViewModel(
         enqueueCommand(PlaybackCommand.PlayQueueIndex(index))
     }
 
+    fun playPlaylist(playlistId: String) {
+        val playlist = _uiState.value.playlists.firstOrNull { it.id == playlistId }
+        if (playlist == null) {
+            emitMessage("Плейлист не найден")
+            return
+        }
+        if (playlist.tracks.isEmpty()) {
+            emitMessage("Плейлист пуст")
+            return
+        }
+        enqueueCommand(PlaybackCommand.ReplaceQueueAndPlay(playlist.tracks, 0))
+    }
+
+    fun createPlaylist(name: String, initialTrack: Track? = null) {
+        viewModelScope.launch {
+            val now = System.currentTimeMillis()
+            val (createdState, createdPlaylist) = PlaylistMutations.create(
+                current = _uiState.value.playlists,
+                rawName = name,
+                nowMs = now
+            )
+
+            if (createdPlaylist == null) {
+                emitMessage("Введите название плейлиста")
+                return@launch
+            }
+
+            val finalState = if (initialTrack != null) {
+                PlaylistMutations.addTrack(
+                    current = createdState,
+                    playlistId = createdPlaylist.id,
+                    track = initialTrack,
+                    nowMs = now
+                )
+            } else {
+                createdState
+            }
+
+            savePlaylists(finalState)
+            emitMessage("Плейлист \"${createdPlaylist.name}\" создан")
+        }
+    }
+
+    fun renamePlaylist(playlistId: String, newName: String) {
+        viewModelScope.launch {
+            val updated = PlaylistMutations.rename(
+                current = _uiState.value.playlists,
+                playlistId = playlistId,
+                rawName = newName,
+                nowMs = System.currentTimeMillis()
+            )
+
+            if (updated == _uiState.value.playlists) {
+                emitMessage("Название не изменено")
+                return@launch
+            }
+
+            savePlaylists(updated)
+        }
+    }
+
+    fun deletePlaylist(playlistId: String) {
+        viewModelScope.launch {
+            val target = _uiState.value.playlists.firstOrNull { it.id == playlistId }
+            val updated = PlaylistMutations.delete(_uiState.value.playlists, playlistId)
+            if (updated == _uiState.value.playlists) return@launch
+
+            savePlaylists(updated)
+            emitMessage("Плейлист \"${target?.name ?: ""}\" удалён")
+        }
+    }
+
+    fun addTrackToPlaylist(playlistId: String, track: Track) {
+        viewModelScope.launch {
+            val updated = PlaylistMutations.addTrack(
+                current = _uiState.value.playlists,
+                playlistId = playlistId,
+                track = track,
+                nowMs = System.currentTimeMillis()
+            )
+
+            if (updated == _uiState.value.playlists) {
+                emitMessage("Трек уже есть в плейлисте")
+                return@launch
+            }
+
+            savePlaylists(updated)
+            emitMessage("Трек добавлен в плейлист")
+        }
+    }
+
+    fun removeTrackFromPlaylist(playlistId: String, track: Track) {
+        viewModelScope.launch {
+            val updated = PlaylistMutations.removeTrack(
+                current = _uiState.value.playlists,
+                playlistId = playlistId,
+                trackIdentityKey = track.identityKey(),
+                nowMs = System.currentTimeMillis()
+            )
+
+            if (updated == _uiState.value.playlists) return@launch
+
+            savePlaylists(updated)
+        }
+    }
+
     fun togglePlayPause() {
         enqueueCommand(PlaybackCommand.TogglePlayPause)
     }
@@ -162,6 +297,14 @@ class PlayerViewModel(
 
     fun seekTo(positionMs: Long) {
         enqueueCommand(PlaybackCommand.SeekTo(positionMs))
+    }
+
+    fun toggleShuffle() {
+        enqueueCommand(PlaybackCommand.ToggleShuffle)
+    }
+
+    fun cycleRepeatMode() {
+        enqueueCommand(PlaybackCommand.CycleRepeatMode)
     }
 
     fun clearQueue() {
@@ -193,6 +336,9 @@ class PlayerViewModel(
         logPlaybackErrorThrottled(error)
         viewModelScope.launch {
             applyEvent(PlaybackEvent.Error(reason))
+            if (reason == PlaybackErrorReason.FILE_UNAVAILABLE) {
+                enqueueCommand(PlaybackCommand.SkipUnavailableCurrent)
+            }
         }
 
         val title = _uiState.value.currentTrack?.title
@@ -203,11 +349,24 @@ class PlayerViewModel(
         super.onCleared()
         commandProcessor?.cancel()
         positionTicker?.cancel()
+        persistSessionJob?.cancel()
         mediaController?.removeListener(this)
         mediaController?.release()
         mediaController = null
         controllerFuture?.cancel(true)
         commandChannel.close()
+    }
+
+    private fun loadPersistedPlaylists() {
+        viewModelScope.launch {
+            val playlists = playlistStore.load()
+            _uiState.update { it.copy(playlists = playlists) }
+        }
+    }
+
+    private suspend fun savePlaylists(playlists: List<UserPlaylist>) {
+        _uiState.update { it.copy(playlists = playlists) }
+        playlistStore.save(playlists)
     }
 
     private fun connectControllerIfNeeded() {
@@ -226,17 +385,10 @@ class PlayerViewModel(
 
                 viewModelScope.launch {
                     applyEvent(PlaybackEvent.ControllerConnectionChanged(true))
-                    val restoredQueue = restoreQueueFromController(controller)
-                    if (restoredQueue.isNotEmpty()) {
-                        val restoredIndex = controller.currentMediaItemIndex.coerceAtLeast(0)
-                        applyEvent(
-                            PlaybackEvent.QueueReplaced(
-                                items = restoredQueue,
-                                startIndex = restoredIndex,
-                                autoPlay = controller.isPlaying
-                            )
-                        )
-                    }
+                    isHydratingSession = true
+                    restorePersistedSessionIfNeeded(controller)
+                    isHydratingSession = false
+
                     syncStateFromPlayer(controller)
                     flushPendingCommands()
                 }
@@ -247,9 +399,59 @@ class PlayerViewModel(
                 }
                 emitMessage("Не удалось подключиться к playback service")
             } finally {
+                isHydratingSession = false
                 controllerFuture = null
             }
         }, ContextCompat.getMainExecutor(app))
+    }
+
+    private suspend fun restorePersistedSessionIfNeeded(controller: MediaController) {
+        if (sessionRestoreAttempted) return
+        sessionRestoreAttempted = true
+
+        if (controller.mediaItemCount > 0) {
+            return
+        }
+
+        _uiState.update { it.copy(isRestoringSession = true) }
+        try {
+            val snapshot = sessionStore.load() ?: return
+            val restorePlan = withContext(Dispatchers.IO) {
+                PlaybackSessionRestorePolicy.build(snapshot) { track ->
+                    repository.isTrackAvailable(track)
+                }
+            }
+
+            if (restorePlan.queue.isEmpty()) {
+                sessionStore.clear()
+                if (restorePlan.skippedCount > 0) {
+                    emitMessage("Старая очередь больше недоступна и очищена")
+                }
+                return
+            }
+
+            controller.setMediaItems(
+                restorePlan.queue.map { it.toMediaItem() },
+                restorePlan.startIndex,
+                restorePlan.seekPositionMs
+            )
+            controller.repeatMode = mapRepeatModeToPlayer(snapshot.repeatMode)
+            controller.shuffleModeEnabled = snapshot.shuffleEnabled
+            controller.prepare()
+            controller.playWhenReady = false
+
+            lastPersistedSession = snapshot.copy(
+                queue = restorePlan.queue,
+                currentIndex = restorePlan.startIndex,
+                positionMs = restorePlan.seekPositionMs
+            )
+
+            if (restorePlan.skippedCount > 0) {
+                emitMessage("Восстановлено с пропуском ${restorePlan.skippedCount} недоступных треков")
+            }
+        } finally {
+            _uiState.update { it.copy(isRestoringSession = false) }
+        }
     }
 
     private fun enqueueCommand(command: PlaybackCommand) {
@@ -361,8 +563,15 @@ class PlayerViewModel(
 
             PlaybackCommand.Next -> {
                 val readyController = controller ?: return
+                if (readyController.mediaItemCount == 0) {
+                    emitMessage("Очередь пуста")
+                    return
+                }
+
                 if (readyController.hasNextMediaItem()) {
                     readyController.seekToNextMediaItem()
+                } else if (readyController.repeatMode == Player.REPEAT_MODE_ALL) {
+                    readyController.seekToDefaultPosition(0)
                 } else {
                     emitMessage("Это последний трек в очереди")
                 }
@@ -370,8 +579,18 @@ class PlayerViewModel(
 
             PlaybackCommand.Previous -> {
                 val readyController = controller ?: return
-                if (readyController.hasPreviousMediaItem() || readyController.currentPosition > PREVIOUS_SEEK_THRESHOLD_MS) {
+                if (readyController.mediaItemCount == 0) {
+                    emitMessage("Очередь пуста")
+                    return
+                }
+
+                val canGoPrevious = readyController.hasPreviousMediaItem() ||
+                    readyController.currentPosition > PREVIOUS_SEEK_THRESHOLD_MS
+
+                if (canGoPrevious) {
                     readyController.seekToPreviousMediaItem()
+                } else if (readyController.repeatMode == Player.REPEAT_MODE_ALL && readyController.mediaItemCount > 0) {
+                    readyController.seekToDefaultPosition(readyController.mediaItemCount - 1)
                 } else {
                     emitMessage("Это начало очереди")
                 }
@@ -390,6 +609,43 @@ class PlayerViewModel(
                 readyController.seekTo(target)
             }
 
+            PlaybackCommand.ToggleShuffle -> {
+                val readyController = controller ?: return
+                readyController.shuffleModeEnabled = !readyController.shuffleModeEnabled
+                syncStateFromPlayer(readyController)
+            }
+
+            PlaybackCommand.CycleRepeatMode -> {
+                val readyController = controller ?: return
+                readyController.repeatMode = nextRepeatMode(readyController.repeatMode)
+                syncStateFromPlayer(readyController)
+            }
+
+            PlaybackCommand.SkipUnavailableCurrent -> {
+                val readyController = controller ?: return
+                val currentIndex = readyController.currentMediaItemIndex
+                if (currentIndex !in 0 until readyController.mediaItemCount) return
+
+                val shouldContinuePlaying = readyController.isPlaying
+                readyController.removeMediaItem(currentIndex)
+
+                if (readyController.mediaItemCount == 0) {
+                    applyEvent(PlaybackEvent.QueueCleared())
+                    return
+                }
+
+                val targetIndex = currentIndex.coerceAtMost(readyController.mediaItemCount - 1)
+                readyController.seekToDefaultPosition(targetIndex)
+                readyController.prepare()
+                readyController.playWhenReady = shouldContinuePlaying
+                if (shouldContinuePlaying) {
+                    readyController.play()
+                }
+
+                syncStateFromPlayer(readyController)
+                emitMessage("Недоступный трек удалён из очереди")
+            }
+
             PlaybackCommand.ClearQueue -> {
                 val readyController = controller ?: return
                 readyController.stop()
@@ -406,19 +662,26 @@ class PlayerViewModel(
 
     private suspend fun syncStateFromPlayer(player: Player) {
         val queueSize = machineState.queue.size
+        val playerQueueSize = player.mediaItemCount
 
-        if (player.mediaItemCount == 0 && queueSize > 0) {
+        if (playerQueueSize == 0 && queueSize > 0) {
             applyEvent(PlaybackEvent.QueueCleared())
-        } else if (player.mediaItemCount > 0 && player.mediaItemCount != queueSize) {
-            val restoredQueue = restoreQueueFromController(player)
-            if (restoredQueue.isNotEmpty()) {
-                applyEvent(
-                    PlaybackEvent.QueueReplaced(
-                        items = restoredQueue,
-                        startIndex = player.currentMediaItemIndex.coerceAtLeast(0),
-                        autoPlay = player.isPlaying
+        } else if (playerQueueSize > 0) {
+            val shouldRestoreQueue = queueSize != playerQueueSize ||
+                queueSize == 0 ||
+                machineState.currentTrackIdentity() != player.currentMediaItem?.mediaId
+
+            if (shouldRestoreQueue) {
+                val restoredQueue = restoreQueueFromController(player)
+                if (restoredQueue.isNotEmpty()) {
+                    applyEvent(
+                        PlaybackEvent.QueueReplaced(
+                            items = restoredQueue,
+                            startIndex = player.currentMediaItemIndex.coerceAtLeast(0),
+                            autoPlay = player.isPlaying
+                        )
                     )
-                )
+                }
             }
         }
 
@@ -433,7 +696,9 @@ class PlayerViewModel(
                 isPlaying = player.isPlaying,
                 status = mapStatus(player.playbackState),
                 positionMs = player.currentPosition,
-                durationMs = if (player.duration > 0L) player.duration else fallbackDuration
+                durationMs = if (player.duration > 0L) player.duration else fallbackDuration,
+                repeatMode = mapRepeatMode(player.repeatMode),
+                shuffleEnabled = player.shuffleModeEnabled
             )
         )
     }
@@ -442,6 +707,10 @@ class PlayerViewModel(
         machineMutex.withLock {
             machineState = stateMachine.reduce(machineState, event)
             publishUiStateLocked(machineState)
+        }
+
+        if (!isHydratingSession) {
+            scheduleSessionPersist()
         }
     }
 
@@ -453,6 +722,8 @@ class PlayerViewModel(
             else -> 0L
         }
 
+        val canSkip = machine.controllerConnected && machine.queue.isNotEmpty()
+
         _uiState.update { current ->
             val updated = current.copy(
                 queueTracks = machine.queue,
@@ -463,9 +734,11 @@ class PlayerViewModel(
                 durationMs = duration,
                 controllerConnected = machine.controllerConnected,
                 playbackStatus = machine.status,
-                canSkipPrevious = machine.currentIndex > 0,
-                canSkipNext = machine.currentIndex in 0 until (machine.queue.size - 1),
-                controlsEnabled = machine.controllerConnected && machine.queue.isNotEmpty()
+                canSkipPrevious = canSkip,
+                canSkipNext = canSkip,
+                controlsEnabled = machine.controllerConnected && machine.queue.isNotEmpty(),
+                repeatMode = machine.repeatMode,
+                shuffleEnabled = machine.shuffleEnabled
             )
 
             if (updated == current) current else updated
@@ -478,18 +751,58 @@ class PlayerViewModel(
         return buildList {
             for (index in 0 until player.mediaItemCount) {
                 val mediaItem = player.getMediaItemAt(index)
-                val mediaUri = mediaItem.localConfiguration?.uri ?: Uri.EMPTY
+                val metadata = mediaItem.mediaMetadata
+                val extras = metadata.extras
+                val mediaUri = extras?.getString(TRACK_EXTRA_URI)
+                    ?.let { Uri.parse(it) }
+                    ?: mediaItem.localConfiguration?.uri
+                    ?: Uri.EMPTY
+
                 add(
                     Track(
                         id = mediaItem.mediaId.ifBlank { "restored_$index" },
-                        title = mediaItem.mediaMetadata.title?.toString() ?: "Track ${index + 1}",
-                        artist = mediaItem.mediaMetadata.artist?.toString() ?: "Unknown artist",
-                        durationMs = 0L,
+                        title = metadata.title?.toString() ?: "Track ${index + 1}",
+                        artist = metadata.artist?.toString() ?: "Unknown artist",
+                        durationMs = extras?.getLong(TRACK_EXTRA_DURATION_MS, 0L) ?: 0L,
                         uri = mediaUri
                     )
                 )
             }
         }
+    }
+
+    private fun scheduleSessionPersist() {
+        persistSessionJob?.cancel()
+        persistSessionJob = viewModelScope.launch {
+            delay(400L)
+            persistSessionNow()
+        }
+    }
+
+    private suspend fun persistSessionNow() {
+        val state = machineState
+        if (!state.controllerConnected || isHydratingSession) return
+
+        if (state.queue.isEmpty()) {
+            if (lastPersistedSession != null) {
+                sessionStore.clear()
+                lastPersistedSession = null
+            }
+            return
+        }
+
+        val snapshot = PlaybackSessionSnapshot(
+            queue = state.queue,
+            currentIndex = state.currentIndex.coerceIn(0, state.queue.lastIndex),
+            positionMs = state.positionMs,
+            repeatMode = state.repeatMode,
+            shuffleEnabled = state.shuffleEnabled
+        )
+
+        if (snapshot == lastPersistedSession) return
+
+        sessionStore.save(snapshot)
+        lastPersistedSession = snapshot
     }
 
     private fun startPositionTicker() {
@@ -539,6 +852,30 @@ class PlayerViewModel(
             Player.STATE_READY -> PlaybackStatus.READY
             Player.STATE_ENDED -> PlaybackStatus.ENDED
             else -> PlaybackStatus.ERROR
+        }
+    }
+
+    private fun mapRepeatMode(playerMode: Int): RepeatModeSetting {
+        return when (playerMode) {
+            Player.REPEAT_MODE_ALL -> RepeatModeSetting.ALL
+            Player.REPEAT_MODE_ONE -> RepeatModeSetting.ONE
+            else -> RepeatModeSetting.OFF
+        }
+    }
+
+    private fun mapRepeatModeToPlayer(mode: RepeatModeSetting): Int {
+        return when (mode) {
+            RepeatModeSetting.OFF -> Player.REPEAT_MODE_OFF
+            RepeatModeSetting.ALL -> Player.REPEAT_MODE_ALL
+            RepeatModeSetting.ONE -> Player.REPEAT_MODE_ONE
+        }
+    }
+
+    private fun nextRepeatMode(current: Int): Int {
+        return when (current) {
+            Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
+            Player.REPEAT_MODE_ALL -> Player.REPEAT_MODE_ONE
+            else -> Player.REPEAT_MODE_OFF
         }
     }
 
@@ -592,6 +929,9 @@ class PlayerViewModel(
         object TogglePlayPause : PlaybackCommand
         object Next : PlaybackCommand
         object Previous : PlaybackCommand
+        object ToggleShuffle : PlaybackCommand
+        object CycleRepeatMode : PlaybackCommand
+        object SkipUnavailableCurrent : PlaybackCommand
         object ClearQueue : PlaybackCommand
         object SyncFromController : PlaybackCommand
     }
@@ -601,4 +941,10 @@ class PlayerViewModel(
         const val LOG_THROTTLE_WINDOW_MS = 8_000L
         const val PREVIOUS_SEEK_THRESHOLD_MS = 3_000L
     }
+}
+
+private fun Track.identityKey(): String = "$id|$uri"
+
+private fun PlaybackMachineState<Track>.currentTrackIdentity(): String? {
+    return queue.getOrNull(currentIndex)?.id
 }

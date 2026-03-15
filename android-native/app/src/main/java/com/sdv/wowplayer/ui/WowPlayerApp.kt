@@ -7,7 +7,9 @@ import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -19,25 +21,36 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ClearAll
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.PauseCircleFilled
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PlayCircleFilled
+import androidx.compose.material.icons.filled.PlaylistAdd
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.QueueMusic
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SnackbarHost
@@ -67,12 +80,15 @@ import com.sdv.wowplayer.core.model.Track
 import com.sdv.wowplayer.domain.player.PlaybackStatus
 import com.sdv.wowplayer.domain.player.PlayerUiState
 import com.sdv.wowplayer.domain.player.PlayerViewModel
+import com.sdv.wowplayer.domain.player.RepeatModeSetting
 import com.sdv.wowplayer.domain.player.VisualizerMode
+import com.sdv.wowplayer.domain.playlist.UserPlaylist
 import kotlin.math.abs
 
 private enum class MainTab {
     Library,
-    Player
+    Player,
+    Playlists
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,6 +98,10 @@ fun WowPlayerApp(viewModel: PlayerViewModel) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var selectedTab by rememberSaveable { mutableStateOf(MainTab.Library) }
+
+    var trackToAddInPlaylist by remember { mutableStateOf<Track?>(null) }
+    var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+    var pendingTrackForNewPlaylist by remember { mutableStateOf<Track?>(null) }
 
     LaunchedEffect(selectedTab) {
         viewModel.setPlayerScreenVisible(selectedTab == MainTab.Player)
@@ -127,6 +147,42 @@ fun WowPlayerApp(viewModel: PlayerViewModel) {
         }
     }
 
+    if (trackToAddInPlaylist != null) {
+        AddTrackToPlaylistDialog(
+            track = trackToAddInPlaylist!!,
+            playlists = uiState.playlists,
+            onDismiss = { trackToAddInPlaylist = null },
+            onSelectPlaylist = { playlistId, track ->
+                viewModel.addTrackToPlaylist(playlistId, track)
+                trackToAddInPlaylist = null
+                selectedTab = MainTab.Playlists
+            },
+            onCreateNewPlaylist = { track ->
+                pendingTrackForNewPlaylist = track
+                showCreatePlaylistDialog = true
+                trackToAddInPlaylist = null
+            }
+        )
+    }
+
+    if (showCreatePlaylistDialog) {
+        PlaylistNameDialog(
+            title = "Новый плейлист",
+            confirmLabel = "Создать",
+            initialName = "",
+            onDismiss = {
+                showCreatePlaylistDialog = false
+                pendingTrackForNewPlaylist = null
+            },
+            onConfirm = { name ->
+                viewModel.createPlaylist(name, pendingTrackForNewPlaylist)
+                showCreatePlaylistDialog = false
+                pendingTrackForNewPlaylist = null
+                selectedTab = MainTab.Playlists
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -153,6 +209,12 @@ fun WowPlayerApp(viewModel: PlayerViewModel) {
                     icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
                     label = { Text("Плеер") }
                 )
+                NavigationBarItem(
+                    selected = selectedTab == MainTab.Playlists,
+                    onClick = { selectedTab = MainTab.Playlists },
+                    icon = { Icon(Icons.Default.PlaylistPlay, contentDescription = null) },
+                    label = { Text("Плейлисты") }
+                )
             }
         }
     ) { padding ->
@@ -177,7 +239,11 @@ fun WowPlayerApp(viewModel: PlayerViewModel) {
                     viewModel.playLibraryTrack(it)
                     selectedTab = MainTab.Player
                 },
-                onTrackQueue = viewModel::enqueueTrack
+                onTrackQueue = viewModel::enqueueTrack,
+                onTrackAddToPlaylist = { track ->
+                    trackToAddInPlaylist = track
+                },
+                onDismissLibraryError = viewModel::clearLibraryError
             )
 
             MainTab.Player -> PlayerScreen(
@@ -189,7 +255,28 @@ fun WowPlayerApp(viewModel: PlayerViewModel) {
                 onSeekTo = viewModel::seekTo,
                 onQueueTrackClick = viewModel::playQueueTrack,
                 onClearQueue = viewModel::clearQueue,
-                onVisualizerModeChange = viewModel::setVisualizerMode
+                onVisualizerModeChange = viewModel::setVisualizerMode,
+                onRepeatClick = viewModel::cycleRepeatMode,
+                onShuffleClick = viewModel::toggleShuffle,
+                onQueueTrackAddToPlaylist = { track ->
+                    trackToAddInPlaylist = track
+                }
+            )
+
+            MainTab.Playlists -> PlaylistsScreen(
+                state = uiState,
+                contentPadding = padding,
+                onCreatePlaylist = {
+                    pendingTrackForNewPlaylist = null
+                    showCreatePlaylistDialog = true
+                },
+                onRenamePlaylist = viewModel::renamePlaylist,
+                onDeletePlaylist = viewModel::deletePlaylist,
+                onPlayPlaylist = { playlistId ->
+                    viewModel.playPlaylist(playlistId)
+                    selectedTab = MainTab.Player
+                },
+                onRemoveTrackFromPlaylist = viewModel::removeTrackFromPlaylist
             )
         }
     }
@@ -202,7 +289,9 @@ private fun LibraryScreen(
     onPickSaf: () -> Unit,
     onLoadMediaStore: () -> Unit,
     onTrackPlay: (Int) -> Unit,
-    onTrackQueue: (Track) -> Unit
+    onTrackQueue: (Track) -> Unit,
+    onTrackAddToPlaylist: (Track) -> Unit,
+    onDismissLibraryError: () -> Unit
 ) {
     LazyColumn(
         modifier = Modifier
@@ -234,9 +323,45 @@ private fun LibraryScreen(
             }
         }
 
-        if (state.libraryTracks.isEmpty()) {
+        if (state.isLoadingLibrary) {
             item {
-                Card {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Сканирую MediaStore...",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            }
+        }
+
+        state.libraryErrorMessage?.let { error ->
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            text = "Ошибка чтения библиотеки",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.error,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text(text = error, style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.height(8.dp))
+                        TextButton(onClick = onDismissLibraryError) {
+                            Text("Скрыть")
+                        }
+                    }
+                }
+            }
+        }
+
+        if (state.libraryTracks.isEmpty() && !state.isLoadingLibrary) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
                     Text(
                         modifier = Modifier.padding(16.dp),
                         text = "MediaStore библиотека пока пустая. Можно сразу добавить файлы через SAF picker.",
@@ -244,7 +369,7 @@ private fun LibraryScreen(
                     )
                 }
             }
-        } else {
+        } else if (state.libraryTracks.isNotEmpty()) {
             item {
                 Text(
                     text = "Треки из MediaStore (${state.libraryTracks.size})",
@@ -260,7 +385,8 @@ private fun LibraryScreen(
                 TrackRow(
                     track = track,
                     onPlay = { onTrackPlay(index) },
-                    onQueue = { onTrackQueue(track) }
+                    onQueue = { onTrackQueue(track) },
+                    onAddToPlaylist = { onTrackAddToPlaylist(track) }
                 )
             }
         }
@@ -277,7 +403,10 @@ private fun PlayerScreen(
     onSeekTo: (Long) -> Unit,
     onQueueTrackClick: (Int) -> Unit,
     onClearQueue: () -> Unit,
-    onVisualizerModeChange: (VisualizerMode) -> Unit
+    onVisualizerModeChange: (VisualizerMode) -> Unit,
+    onRepeatClick: () -> Unit,
+    onShuffleClick: () -> Unit,
+    onQueueTrackAddToPlaylist: (Track) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -303,7 +432,9 @@ private fun PlayerScreen(
                 onSeekTo = onSeekTo,
                 onPlayPause = onPlayPause,
                 onPrevious = onPrevious,
-                onNext = onNext
+                onNext = onNext,
+                onRepeatClick = onRepeatClick,
+                onShuffleClick = onShuffleClick
             )
         }
 
@@ -355,7 +486,7 @@ private fun PlayerScreen(
             ) {
                 itemsIndexed(
                     items = state.queueTracks,
-                    key = { _, track -> track.id }
+                    key = { _, track -> track.id + track.uri.toString() }
                 ) { index, track ->
                     Card {
                         Row(
@@ -377,6 +508,9 @@ private fun PlayerScreen(
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
                             }
+                            IconButton(onClick = { onQueueTrackAddToPlaylist(track) }) {
+                                Icon(Icons.Default.PlaylistAdd, contentDescription = "Добавить в плейлист")
+                            }
                             if (index == state.currentIndex) {
                                 Text("▶")
                             } else {
@@ -393,14 +527,296 @@ private fun PlayerScreen(
 }
 
 @Composable
+private fun PlaylistsScreen(
+    state: PlayerUiState,
+    contentPadding: PaddingValues,
+    onCreatePlaylist: () -> Unit,
+    onRenamePlaylist: (String, String) -> Unit,
+    onDeletePlaylist: (String) -> Unit,
+    onPlayPlaylist: (String) -> Unit,
+    onRemoveTrackFromPlaylist: (String, Track) -> Unit
+) {
+    var selectedPlaylistId by rememberSaveable { mutableStateOf<String?>(null) }
+    var renameTarget by remember { mutableStateOf<UserPlaylist?>(null) }
+    var deleteTarget by remember { mutableStateOf<UserPlaylist?>(null) }
+
+    LaunchedEffect(state.playlists) {
+        val ids = state.playlists.map { it.id }.toSet()
+        if (selectedPlaylistId == null || selectedPlaylistId !in ids) {
+            selectedPlaylistId = state.playlists.firstOrNull()?.id
+        }
+    }
+
+    renameTarget?.let { target ->
+        PlaylistNameDialog(
+            title = "Переименовать плейлист",
+            confirmLabel = "Сохранить",
+            initialName = target.name,
+            onDismiss = { renameTarget = null },
+            onConfirm = { newName ->
+                onRenamePlaylist(target.id, newName)
+                renameTarget = null
+            }
+        )
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Удалить плейлист?") },
+            text = { Text("${target.name} будет удалён вместе с треками внутри.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onDeletePlaylist(target.id)
+                        deleteTarget = null
+                    }
+                ) {
+                    Text("Удалить")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteTarget = null }) {
+                    Text("Отмена")
+                }
+            }
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(contentPadding),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Плейлисты",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                Button(onClick = onCreatePlaylist) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(Modifier.size(6.dp))
+                    Text("Создать")
+                }
+            }
+        }
+
+        if (state.playlists.isEmpty()) {
+            item {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        modifier = Modifier.padding(16.dp),
+                        text = "Плейлистов пока нет. Создайте первый и добавляйте треки из библиотеки или очереди.",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        } else {
+            itemsIndexed(
+                items = state.playlists,
+                key = { _, playlist -> playlist.id }
+            ) { _, playlist ->
+                val isSelected = playlist.id == selectedPlaylistId
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = if (isSelected) {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            } else {
+                                Color.Transparent
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = playlist.name,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Треков: ${playlist.tracks.size}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(onClick = { renameTarget = playlist }) {
+                                Icon(Icons.Default.Edit, contentDescription = "Rename playlist")
+                            }
+                            IconButton(onClick = { deleteTarget = playlist }) {
+                                Icon(Icons.Default.Delete, contentDescription = "Delete playlist")
+                            }
+                        }
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            TextButton(onClick = { selectedPlaylistId = playlist.id }) {
+                                Text(if (isSelected) "Выбран ✓" else "Открыть")
+                            }
+                            TextButton(onClick = { onPlayPlaylist(playlist.id) }) {
+                                Text("Play all")
+                            }
+                        }
+                    }
+                }
+            }
+
+            val selectedPlaylist = state.playlists.firstOrNull { it.id == selectedPlaylistId }
+            if (selectedPlaylist != null) {
+                item {
+                    Text(
+                        text = "${selectedPlaylist.name}: треки",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                if (selectedPlaylist.tracks.isEmpty()) {
+                    item {
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Text(
+                                modifier = Modifier.padding(16.dp),
+                                text = "Плейлист пуст. Добавьте треки из библиотеки или очереди.",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                        }
+                    }
+                } else {
+                    itemsIndexed(
+                        items = selectedPlaylist.tracks,
+                        key = { _, track -> track.id + track.uri.toString() }
+                    ) { _, track ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text(
+                                        track.artist,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                IconButton(onClick = { onRemoveTrackFromPlaylist(selectedPlaylist.id, track) }) {
+                                    Icon(Icons.Default.Delete, contentDescription = "Удалить трек")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AddTrackToPlaylistDialog(
+    track: Track,
+    playlists: List<UserPlaylist>,
+    onDismiss: () -> Unit,
+    onSelectPlaylist: (String, Track) -> Unit,
+    onCreateNewPlaylist: (Track) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Добавить в плейлист") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = track.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+
+                if (playlists.isEmpty()) {
+                    Text("Сначала создайте плейлист")
+                } else {
+                    playlists.forEach { playlist ->
+                        TextButton(onClick = { onSelectPlaylist(playlist.id, track) }) {
+                            Text(playlist.name)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onCreateNewPlaylist(track) }) {
+                Text("Новый плейлист")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
+}
+
+@Composable
+private fun PlaylistNameDialog(
+    title: String,
+    confirmLabel: String,
+    initialName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var value by remember(initialName) { mutableStateOf(initialName) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            OutlinedTextField(
+                value = value,
+                onValueChange = { value = it },
+                singleLine = true,
+                label = { Text("Название") }
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(value) }) {
+                Text(confirmLabel)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Отмена")
+            }
+        }
+    )
+}
+
+@Composable
 private fun StatusStrip(state: PlayerUiState) {
-    val text = when (state.playbackStatus) {
-        PlaybackStatus.DISCONNECTED -> "Подключение к сервису..."
-        PlaybackStatus.IDLE -> "Ожидание"
-        PlaybackStatus.BUFFERING -> "Буферизация"
-        PlaybackStatus.READY -> if (state.isPlaying) "Воспроизведение" else "Пауза"
-        PlaybackStatus.ENDED -> "Очередь завершена"
-        PlaybackStatus.ERROR -> "Ошибка воспроизведения"
+    val text = when {
+        state.isRestoringSession -> "Восстановление предыдущей сессии..."
+        else -> when (state.playbackStatus) {
+            PlaybackStatus.DISCONNECTED -> "Подключение к сервису..."
+            PlaybackStatus.IDLE -> "Ожидание"
+            PlaybackStatus.BUFFERING -> "Буферизация"
+            PlaybackStatus.READY -> if (state.isPlaying) "Воспроизведение" else "Пауза"
+            PlaybackStatus.ENDED -> "Очередь завершена"
+            PlaybackStatus.ERROR -> "Ошибка воспроизведения"
+        }
     }
 
     Text(
@@ -416,7 +832,9 @@ private fun CurrentTrackCard(
     onSeekTo: (Long) -> Unit,
     onPlayPause: () -> Unit,
     onPrevious: () -> Unit,
-    onNext: () -> Unit
+    onNext: () -> Unit,
+    onRepeatClick: () -> Unit,
+    onShuffleClick: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -432,7 +850,16 @@ private fun CurrentTrackCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(14.dp))
+
+            RepeatShuffleRow(
+                repeatMode = state.repeatMode,
+                shuffleEnabled = state.shuffleEnabled,
+                onRepeatClick = onRepeatClick,
+                onShuffleClick = onShuffleClick
+            )
+
+            Spacer(Modifier.height(12.dp))
 
             val duration = state.durationMs.coerceAtLeast(1L)
             var sliderPosition by remember(state.currentTrack?.id, duration) {
@@ -508,6 +935,41 @@ private fun CurrentTrackCard(
 }
 
 @Composable
+private fun RepeatShuffleRow(
+    repeatMode: RepeatModeSetting,
+    shuffleEnabled: Boolean,
+    onRepeatClick: () -> Unit,
+    onShuffleClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        TextButton(onClick = onShuffleClick) {
+            Icon(Icons.Default.Shuffle, contentDescription = null)
+            Spacer(Modifier.size(4.dp))
+            Text(if (shuffleEnabled) "Shuffle ON" else "Shuffle OFF")
+        }
+
+        TextButton(onClick = onRepeatClick) {
+            when (repeatMode) {
+                RepeatModeSetting.OFF -> Icon(Icons.Default.Repeat, contentDescription = null)
+                RepeatModeSetting.ALL -> Icon(Icons.Default.Repeat, contentDescription = null)
+                RepeatModeSetting.ONE -> Icon(Icons.Default.RepeatOne, contentDescription = null)
+            }
+            Spacer(Modifier.size(4.dp))
+            Text(
+                when (repeatMode) {
+                    RepeatModeSetting.OFF -> "Repeat OFF"
+                    RepeatModeSetting.ALL -> "Repeat ALL"
+                    RepeatModeSetting.ONE -> "Repeat ONE"
+                }
+            )
+        }
+    }
+}
+
+@Composable
 private fun VisualizerModeRow(
     mode: VisualizerMode,
     onModeChange: (VisualizerMode) -> Unit
@@ -565,7 +1027,8 @@ private fun UltraLightVisualizer(
 private fun TrackRow(
     track: Track,
     onPlay: () -> Unit,
-    onQueue: () -> Unit
+    onQueue: () -> Unit,
+    onAddToPlaylist: () -> Unit
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -585,6 +1048,9 @@ private fun TrackRow(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+            IconButton(onClick = onAddToPlaylist) {
+                Icon(Icons.Default.PlaylistAdd, contentDescription = "Добавить в плейлист")
             }
             IconButton(onClick = onQueue) {
                 Icon(Icons.Default.Add, contentDescription = "Queue")

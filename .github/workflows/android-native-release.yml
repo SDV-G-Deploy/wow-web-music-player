@@ -1,0 +1,103 @@
+name: Android Native Release (signed APK + AAB)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'android-native/**'
+      - '.github/workflows/android-native-release.yml'
+
+jobs:
+  build-android-native-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate signing secrets (fail-fast)
+        shell: bash
+        env:
+          WOW_ANDROID_KEYSTORE_BASE64: ${{ secrets.WOW_ANDROID_KEYSTORE_BASE64 }}
+          WOW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.WOW_ANDROID_KEYSTORE_PASSWORD }}
+          WOW_ANDROID_KEY_ALIAS: ${{ secrets.WOW_ANDROID_KEY_ALIAS }}
+          WOW_ANDROID_KEY_PASSWORD: ${{ secrets.WOW_ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=0
+          for key in WOW_ANDROID_KEYSTORE_BASE64 WOW_ANDROID_KEYSTORE_PASSWORD WOW_ANDROID_KEY_ALIAS WOW_ANDROID_KEY_PASSWORD; do
+            if [ -z "${!key}" ]; then
+              echo "::error::Missing required GitHub secret: $key"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Native release signing secrets are missing. Configure WOW_ANDROID_* secrets in repository settings."
+            exit 1
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Prepare local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android-native/local.properties
+
+      - name: Decode release keystore
+        shell: bash
+        run: |
+          echo "${{ secrets.WOW_ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android-native/release-keystore.jks
+
+      - name: Build signed release APK
+        working-directory: android-native
+        env:
+          WOW_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android-native/release-keystore.jks
+          WOW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.WOW_ANDROID_KEYSTORE_PASSWORD }}
+          WOW_ANDROID_KEY_ALIAS: ${{ secrets.WOW_ANDROID_KEY_ALIAS }}
+          WOW_ANDROID_KEY_PASSWORD: ${{ secrets.WOW_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Build signed release AAB
+        working-directory: android-native
+        env:
+          WOW_ANDROID_KEYSTORE_PATH: ${{ github.workspace }}/android-native/release-keystore.jks
+          WOW_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.WOW_ANDROID_KEYSTORE_PASSWORD }}
+          WOW_ANDROID_KEY_ALIAS: ${{ secrets.WOW_ANDROID_KEY_ALIAS }}
+          WOW_ANDROID_KEY_PASSWORD: ${{ secrets.WOW_ANDROID_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon :app:bundleRelease
+
+      - name: Verify release artifacts
+        run: |
+          ls -lah android-native/app/build/outputs/apk/release
+          ls -lah android-native/app/build/outputs/bundle/release
+          test -f android-native/app/build/outputs/apk/release/app-release.apk
+          test -f android-native/app/build/outputs/bundle/release/app-release.aab
+
+      - name: Upload release APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-native-player-release-apk
+          path: android-native/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Upload release AAB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wow-native-player-release-aab
+          path: android-native/app/build/outputs/bundle/release/app-release.aab
+          if-no-files-found: error
+
+      - name: Cleanup keystore
+        if: always()
+        run: rm -f android-native/release-keystore.jks

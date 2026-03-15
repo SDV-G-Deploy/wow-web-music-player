@@ -66,7 +66,7 @@ class PlaybackStateMachineTest {
     }
 
     @Test
-    fun `snapshot never leaves out of bounds current index`() {
+    fun `snapshot never leaves out of bounds current index and keeps repeat shuffle`() {
         val base = machine.reduce(
             PlaybackMachineState(),
             PlaybackEvent.QueueReplaced(
@@ -83,7 +83,9 @@ class PlaybackStateMachineTest {
                 isPlaying = true,
                 status = PlaybackStatus.READY,
                 positionMs = 800,
-                durationMs = 1200
+                durationMs = 1200,
+                repeatMode = RepeatModeSetting.ALL,
+                shuffleEnabled = true
             )
         )
 
@@ -91,6 +93,8 @@ class PlaybackStateMachineTest {
         assertTrue(snapshot.isPlaying)
         assertEquals(PlaybackStatus.READY, snapshot.status)
         assertEquals(800L, snapshot.positionMs)
+        assertEquals(RepeatModeSetting.ALL, snapshot.repeatMode)
+        assertTrue(snapshot.shuffleEnabled)
         assertInvariant(snapshot)
     }
 

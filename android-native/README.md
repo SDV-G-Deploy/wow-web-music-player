@@ -1,80 +1,101 @@
 # WOW Native Player (`android-native/`)
 
-Итерация 2 нативного Android-плеера для `wow-web-music-player`.
+Итерация 3 нативного Android-плеера для `wow-web-music-player`.
 
 ## Что внутри
 
 - Kotlin + Jetpack Compose (single-activity)
-- Media3 ExoPlayer + MediaSessionService
-- Детерминированная playback state machine + сериализованный command pipeline
-- MVVM/Clean-ish каркас:
-  - `core/model` — базовые модели (`Track`)
-  - `data/library` — локальные источники (MediaStore + SAF URI mapping)
-  - `domain/library` — use cases
-  - `domain/player` — `PlayerViewModel`, state machine, UI state
-  - `service` — foreground playback через `MediaSessionService`
-  - `ui` — библиотека, плеер и очередь
+- Media3 ExoPlayer + `MediaSessionService`
+- Сериализованный playback command pipeline + детерминированный state machine
+- Persist playback-сессии (очередь/текущий трек/позиция/repeat/shuffle)
+- Пользовательские плейлисты (create/rename/delete + add/remove треки)
+- Fallback-логика для недоступных треков при restore и в runtime
 
-## Reliability / lightweight baseline (итерация 2)
+## Итерация 3: основные изменения
 
-- Последовательная обработка команд (`next/prev/play/pause/seek`) без гонок
-- Корректный `clear/reload` очереди через единый state reducer
-- Восстановление состояния после reconnect/background/foreground
-- Троттлинг дублирующихся playback-логов (без log spam)
-- UI оптимизации:
-  - seek теперь отправляется по `onValueChangeFinished` (меньше лишних вызовов)
-  - ключи в `LazyColumn` для стабильных списков
-  - ultra-light visualizer с режимом `OFF` по умолчанию
+### UX polish (легковесно)
 
-## UX
+- Чёткие состояния:
+  - loading (`MediaStore scan` progress)
+  - empty (библиотека/очередь/плейлисты)
+  - error (inline + snackbar)
+- Микроулучшения без тяжёлых эффектов:
+  - быстрые playlist actions в библиотеке и очереди
+  - repeat/shuffle controls в now playing
+  - улучшенная читаемость карточек и списков
+- Compose остаётся low-overhead (без тяжелых анимаций/сложных render-path).
 
-- Пустые состояния библиотеки/очереди без блокировок
-- Понятные сообщения для неподдерживаемых/битых файлов
-- Предсказуемые queue-controls: disabled prev/next на краях, clear queue
+### Плейлисты + persistence
 
-## Tests
+- Плейлисты:
+  - создание / переименование / удаление
+  - добавление треков из библиотеки и очереди
+  - удаление треков из плейлиста
+  - запуск playback для всего плейлиста
+- Persistence playback-сессии:
+  - очередь
+  - текущий индекс
+  - позиция
+  - режимы repeat/shuffle
+- Восстановление после перезапуска:
+  - restore с пропуском недоступных треков
+  - безопасная очистка stale session, если всё недоступно
+- Runtime fallback:
+  - недоступный текущий трек автоматически удаляется из очереди,
+  - playback безопасно продолжает следующий доступный трек.
 
-- JVM unit tests: `PlaybackStateMachineTest`
-- Compose instrumented smoke: `SmokeUiTest` (сборочный gate через `assembleAndroidTest`)
+## Качество
 
-## Локальный запуск
+- Unit tests:
+  - `PlaybackStateMachineTest`
+  - `PlaylistMutationsTest`
+  - `PlaybackSessionRestorePolicyTest`
+- Instrumented smoke:
+  - `SmokeUiTest` (launch + tabs reachability)
 
-Требования:
-- JDK 17
-- Android SDK (platform 35)
-
-Сборка debug APK:
+Локально:
 
 ```bash
 cd android-native
+./gradlew :app:testDebugUnitTest
+./gradlew :app:assembleAndroidTest
 ./gradlew :app:assembleDebug
 ```
 
-Unit tests:
+## Release pipeline (production-ready)
 
-```bash
-./gradlew :app:testDebugUnitTest
-```
+### Build env (локально/CI)
 
-APK после сборки:
+Release build требует env:
 
-```text
-android-native/app/build/outputs/apk/debug/app-debug.apk
-```
+- `WOW_ANDROID_KEYSTORE_PATH`
+- `WOW_ANDROID_KEYSTORE_PASSWORD`
+- `WOW_ANDROID_KEY_ALIAS`
+- `WOW_ANDROID_KEY_PASSWORD`
 
-## CI
+Gradle task `verifyReleaseSigningEnv` делает fail-fast с понятной ошибкой, если env не задан.
 
-Workflow: `.github/workflows/android-native-debug.yml`
+### GitHub Actions
 
-Собирает:
-- `:app:testDebugUnitTest`
-- `:app:assembleAndroidTest`
-- `:app:assembleDebug`
+- Debug: `.github/workflows/android-native-debug.yml`
+  - artifact: `wow-native-player-debug-apk`
+- Release: `.github/workflows/android-native-release.yml`
+  - secrets:
+    - `WOW_ANDROID_KEYSTORE_BASE64`
+    - `WOW_ANDROID_KEYSTORE_PASSWORD`
+    - `WOW_ANDROID_KEY_ALIAS`
+    - `WOW_ANDROID_KEY_PASSWORD`
+  - artifacts:
+    - `wow-native-player-release-apk`
+    - `wow-native-player-release-aab`
 
-Публикует artifact:
-- `wow-native-player-debug-apk`
+Если secrets отсутствуют, release workflow падает на первом шаге (`Validate signing secrets`) с явным fail-fast.
 
-## Документация итераций
+## Versioning / changelog
 
-- `android-native/ITERATION_1.md`
-- `android-native/ITERATION_2.md`
+- Текущая версия: `0.3.0` (`versionCode = 3`)
+- Changelog: `android-native/CHANGELOG.md`
+- Итерационные отчёты:
+  - `ITERATION_1.md`
+  - `ITERATION_2.md`
+  - `ITERATION_3.md`
