@@ -8,7 +8,7 @@
   - remove track from queue (demo + local)
   - clear queue action with confirmation
 - User playlists (local-only):
-  - create from queue, rename, delete
+  - create from queue, add individual queue tracks (`+PL`), rename, delete
   - saved in `localStorage` (`wwmp-user-playlists-v1`)
   - load playlist back to queue in one click
   - export/import playlists JSON
@@ -17,7 +17,7 @@
   - confirmation dialogs for destructive actions
   - toast statuses for saved/imported/deleted/error flows
 - Kept v4 core behavior intact (crossfade, shuffle/repeat, visual presets, media session, local upload).
-- Expanded playback/queue tests: reorder/remove/move-step logic.
+- Expanded playback/queue tests: reorder/remove/move-step logic + playlist-load mapping.
 
 ## v5-pre (stabilization pass)
 - Fixed playback navigation freeze on prev/next by removing stale state usage in async/media-session/end handlers and adding transition lock + fallback error handling.
