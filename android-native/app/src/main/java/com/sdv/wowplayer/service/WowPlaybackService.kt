@@ -18,6 +18,9 @@ class WowPlaybackService : MediaSessionService() {
     private var player: ExoPlayer? = null
     private var mediaSession: MediaSession? = null
 
+    private var lastErrorSignature: String? = null
+    private var lastErrorAtMs: Long = 0L
+
     override fun onCreate() {
         super.onCreate()
         runCatching {
@@ -32,7 +35,7 @@ class WowPlaybackService : MediaSessionService() {
                 addListener(
                     object : Player.Listener {
                         override fun onPlayerError(error: PlaybackException) {
-                            Log.e(TAG, "Player error in service", error)
+                            logServiceErrorThrottled(error)
                         }
                     }
                 )
@@ -75,7 +78,22 @@ class WowPlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
+    private fun logServiceErrorThrottled(error: PlaybackException) {
+        val now = System.currentTimeMillis()
+        val signature = "${error.errorCodeName}:${error.cause?.javaClass?.simpleName}"
+
+        val shouldLog = signature != lastErrorSignature ||
+            now - lastErrorAtMs > LOG_THROTTLE_WINDOW_MS
+
+        if (shouldLog) {
+            Log.e(TAG, "Player error in service [${error.errorCodeName}]", error)
+            lastErrorSignature = signature
+            lastErrorAtMs = now
+        }
+    }
+
     private companion object {
         const val TAG = "WowPlaybackService"
+        const val LOG_THROTTLE_WINDOW_MS = 8_000L
     }
 }

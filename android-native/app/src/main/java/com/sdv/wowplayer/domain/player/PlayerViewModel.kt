@@ -20,12 +20,15 @@ import com.sdv.wowplayer.domain.library.GetMediaStoreTracksUseCase
 import com.sdv.wowplayer.domain.library.GetSafTracksUseCase
 import com.sdv.wowplayer.service.WowPlaybackService
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 @UnstableApi
 class PlayerViewModel(
@@ -36,24 +39,43 @@ class PlayerViewModel(
     private val getMediaStoreTracks = GetMediaStoreTracksUseCase(repository)
     private val getSafTracks = GetSafTracksUseCase(repository)
 
+    private val stateMachine = PlaybackStateMachine<Track>()
+    private val machineMutex = Mutex()
+    private var machineState = PlaybackMachineState<Track>()
+
     private val _uiState = MutableStateFlow(PlayerUiState())
     val uiState = _uiState.asStateFlow()
 
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
+
+    private val commandChannel = Channel<PlaybackCommand>(capacity = Channel.UNLIMITED)
+    private val pendingCommands = ArrayDeque<PlaybackCommand>()
+
     private var positionTicker: Job? = null
+    private var commandProcessor: Job? = null
+    private var isPlayerScreenVisible = false
+
+    private var lastLoggedErrorSignature: String? = null
+    private var lastLoggedErrorAtMs: Long = 0L
 
     init {
+        startCommandProcessor()
         connectControllerIfNeeded()
         startPositionTicker()
     }
 
     fun onHostStarted() {
         connectControllerIfNeeded()
+        enqueueCommand(PlaybackCommand.SyncFromController)
     }
 
     fun onHostStopped() {
         Log.d(TAG, "UI host stopped - playback continues in MediaSessionService")
+    }
+
+    fun setPlayerScreenVisible(visible: Boolean) {
+        isPlayerScreenVisible = visible
     }
 
     fun loadMediaStoreLibrary() {
@@ -85,17 +107,24 @@ class PlayerViewModel(
         if (uris.isEmpty()) return
 
         viewModelScope.launch {
-            getSafTracks(uris)
+            val (supportedUris, unsupportedCount) = splitSupportedUris(uris)
+            if (unsupportedCount > 0) {
+                emitMessage("$unsupportedCount файл(ов) пропущено: неподдерживаемый формат")
+            }
+
+            if (supportedUris.isEmpty()) return@launch
+
+            getSafTracks(supportedUris)
                 .onSuccess { tracks ->
                     if (tracks.isEmpty()) {
-                        _uiState.update { it.copy(errorMessage = "Файлы не были распознаны") }
-                        return@launch
+                        emitMessage("Файлы не были распознаны")
+                        return@onSuccess
                     }
-                    appendToQueue(tracks)
+                    enqueueCommand(PlaybackCommand.AppendQueue(tracks))
                 }
                 .onFailure { throwable ->
                     Log.e(TAG, "SAF mapping failed", throwable)
-                    _uiState.update { it.copy(errorMessage = "Ошибка при обработке выбранных файлов") }
+                    emitMessage("Ошибка при обработке выбранных файлов")
                 }
         }
     }
@@ -103,75 +132,82 @@ class PlayerViewModel(
     fun playLibraryTrack(index: Int) {
         val tracks = _uiState.value.libraryTracks
         if (tracks.isEmpty()) {
-            _uiState.update { it.copy(errorMessage = "Библиотека пустая") }
+            emitMessage("Библиотека пустая")
             return
         }
 
         val normalizedIndex = index.coerceIn(0, tracks.lastIndex)
-        setQueueAndPlay(tracks, normalizedIndex)
+        enqueueCommand(PlaybackCommand.ReplaceQueueAndPlay(tracks, normalizedIndex))
     }
 
     fun enqueueTrack(track: Track) {
-        appendToQueue(listOf(track))
+        enqueueCommand(PlaybackCommand.AppendQueue(listOf(track)))
     }
 
     fun playQueueTrack(index: Int) {
-        val controller = mediaController ?: return
-        if (index !in _uiState.value.queueTracks.indices) return
-        controller.seekToDefaultPosition(index)
-        controller.playWhenReady = true
-        controller.play()
+        enqueueCommand(PlaybackCommand.PlayQueueIndex(index))
     }
 
     fun togglePlayPause() {
-        val controller = mediaController ?: run {
-            _uiState.update { it.copy(errorMessage = "Плеер ещё подключается") }
-            connectControllerIfNeeded()
-            return
-        }
-
-        if (controller.isPlaying) {
-            controller.pause()
-        } else {
-            if (controller.playbackState == Player.STATE_IDLE) {
-                controller.prepare()
-            }
-            controller.play()
-        }
+        enqueueCommand(PlaybackCommand.TogglePlayPause)
     }
 
     fun playNext() {
-        mediaController?.seekToNextMediaItem()
+        enqueueCommand(PlaybackCommand.Next)
     }
 
     fun playPrevious() {
-        mediaController?.seekToPreviousMediaItem()
+        enqueueCommand(PlaybackCommand.Previous)
     }
 
     fun seekTo(positionMs: Long) {
-        mediaController?.seekTo(positionMs)
+        enqueueCommand(PlaybackCommand.SeekTo(positionMs))
+    }
+
+    fun clearQueue() {
+        enqueueCommand(PlaybackCommand.ClearQueue)
+    }
+
+    fun setVisualizerMode(mode: VisualizerMode) {
+        _uiState.update { current ->
+            val updated = current.copy(visualizerMode = mode)
+            if (updated == current) current else updated
+        }
     }
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
+        viewModelScope.launch {
+            applyEvent(PlaybackEvent.ResetError())
+        }
     }
 
     override fun onEvents(player: Player, events: Player.Events) {
-        syncStateFromPlayer(player)
+        viewModelScope.launch {
+            syncStateFromPlayer(player)
+        }
     }
 
     override fun onPlayerError(error: PlaybackException) {
-        Log.e(TAG, "Playback error", error)
-        _uiState.update { it.copy(errorMessage = "Ошибка воспроизведения: ${error.errorCodeName}") }
+        val reason = mapErrorReason(error)
+        logPlaybackErrorThrottled(error)
+        viewModelScope.launch {
+            applyEvent(PlaybackEvent.Error(reason))
+        }
+
+        val title = _uiState.value.currentTrack?.title
+        emitMessage(formatPlaybackError(reason, title))
     }
 
     override fun onCleared() {
         super.onCleared()
+        commandProcessor?.cancel()
         positionTicker?.cancel()
         mediaController?.removeListener(this)
         mediaController?.release()
         mediaController = null
         controllerFuture?.cancel(true)
+        commandChannel.close()
     }
 
     private fun connectControllerIfNeeded() {
@@ -187,87 +223,260 @@ class PlayerViewModel(
                 val controller = future.get()
                 mediaController = controller
                 controller.addListener(this)
-                val restoredQueue = restoreQueueFromController(controller)
-                syncStateFromPlayer(controller, restoredQueue)
-                _uiState.update { it.copy(controllerConnected = true, errorMessage = null) }
+
+                viewModelScope.launch {
+                    applyEvent(PlaybackEvent.ControllerConnectionChanged(true))
+                    val restoredQueue = restoreQueueFromController(controller)
+                    if (restoredQueue.isNotEmpty()) {
+                        val restoredIndex = controller.currentMediaItemIndex.coerceAtLeast(0)
+                        applyEvent(
+                            PlaybackEvent.QueueReplaced(
+                                items = restoredQueue,
+                                startIndex = restoredIndex,
+                                autoPlay = controller.isPlaying
+                            )
+                        )
+                    }
+                    syncStateFromPlayer(controller)
+                    flushPendingCommands()
+                }
             } catch (t: Throwable) {
                 Log.e(TAG, "Failed to connect MediaController", t)
-                _uiState.update {
-                    it.copy(
-                        controllerConnected = false,
-                        errorMessage = "Не удалось подключиться к playback service"
-                    )
+                viewModelScope.launch {
+                    applyEvent(PlaybackEvent.ControllerConnectionChanged(false))
                 }
+                emitMessage("Не удалось подключиться к playback service")
             } finally {
                 controllerFuture = null
             }
         }, ContextCompat.getMainExecutor(app))
     }
 
-    private fun appendToQueue(tracks: List<Track>) {
-        val controller = mediaController ?: run {
-            _uiState.update { it.copy(errorMessage = "Плеер ещё подключается") }
-            connectControllerIfNeeded()
-            return
-        }
-
-        val wasEmpty = controller.mediaItemCount == 0
-        controller.addMediaItems(tracks.map { it.toMediaItem() })
-        if (wasEmpty) {
-            controller.prepare()
-            controller.play()
-        }
-
-        val updatedQueue = _uiState.value.queueTracks + tracks
-        _uiState.update { it.copy(queueTracks = updatedQueue, errorMessage = null) }
-        if (wasEmpty) {
-            syncStateFromPlayer(controller, updatedQueue)
+    private fun enqueueCommand(command: PlaybackCommand) {
+        commandChannel.trySend(command).onFailure {
+            Log.w(TAG, "Dropping command: $command")
         }
     }
 
-    private fun setQueueAndPlay(tracks: List<Track>, startIndex: Int) {
-        val controller = mediaController ?: run {
-            _uiState.update { it.copy(errorMessage = "Плеер ещё подключается") }
-            connectControllerIfNeeded()
+    private fun queuePendingCommand(command: PlaybackCommand) {
+        pendingCommands.addLast(command)
+        connectControllerIfNeeded()
+    }
+
+    private suspend fun flushPendingCommands() {
+        if (pendingCommands.isEmpty()) return
+
+        val toReplay = pendingCommands.toList()
+        pendingCommands.clear()
+        toReplay.forEach { enqueueCommand(it) }
+    }
+
+    private fun startCommandProcessor() {
+        commandProcessor = viewModelScope.launch {
+            for (command in commandChannel) {
+                executeCommand(command)
+            }
+        }
+    }
+
+    private suspend fun executeCommand(command: PlaybackCommand) {
+        val controller = mediaController
+        if (controller == null && command !is PlaybackCommand.SyncFromController) {
+            queuePendingCommand(command)
+            emitMessage("Плеер подключается…")
             return
         }
 
-        controller.setMediaItems(tracks.map { it.toMediaItem() }, startIndex, 0L)
-        controller.prepare()
-        controller.playWhenReady = true
-        controller.play()
-        syncStateFromPlayer(controller, tracks)
+        when (command) {
+            is PlaybackCommand.ReplaceQueueAndPlay -> {
+                val readyController = controller ?: return
+                if (command.tracks.isEmpty()) {
+                    executeCommand(PlaybackCommand.ClearQueue)
+                    return
+                }
+                val startIndex = command.startIndex.coerceIn(0, command.tracks.lastIndex)
+                readyController.setMediaItems(command.tracks.map { it.toMediaItem() }, startIndex, 0L)
+                readyController.prepare()
+                readyController.playWhenReady = true
+                readyController.play()
+
+                applyEvent(
+                    PlaybackEvent.QueueReplaced(
+                        items = command.tracks,
+                        startIndex = startIndex,
+                        autoPlay = true
+                    )
+                )
+            }
+
+            is PlaybackCommand.AppendQueue -> {
+                val readyController = controller ?: return
+                if (command.tracks.isEmpty()) return
+
+                val wasEmpty = readyController.mediaItemCount == 0
+                readyController.addMediaItems(command.tracks.map { it.toMediaItem() })
+
+                if (wasEmpty) {
+                    readyController.prepare()
+                    readyController.playWhenReady = true
+                    readyController.play()
+                }
+
+                applyEvent(PlaybackEvent.QueueAppended(command.tracks))
+            }
+
+            is PlaybackCommand.PlayQueueIndex -> {
+                val readyController = controller ?: return
+                val state = machineState
+                if (command.index !in state.queue.indices) {
+                    emitMessage("Трек вне диапазона очереди")
+                    return
+                }
+
+                readyController.seekToDefaultPosition(command.index)
+                if (readyController.playbackState == Player.STATE_IDLE) {
+                    readyController.prepare()
+                }
+                readyController.playWhenReady = true
+                readyController.play()
+            }
+
+            is PlaybackCommand.TogglePlayPause -> {
+                val readyController = controller ?: return
+                if (readyController.mediaItemCount == 0) {
+                    emitMessage("Очередь пуста")
+                    return
+                }
+
+                if (readyController.isPlaying) {
+                    readyController.pause()
+                } else {
+                    if (readyController.playbackState == Player.STATE_IDLE) {
+                        readyController.prepare()
+                    }
+                    readyController.play()
+                }
+            }
+
+            PlaybackCommand.Next -> {
+                val readyController = controller ?: return
+                if (readyController.hasNextMediaItem()) {
+                    readyController.seekToNextMediaItem()
+                } else {
+                    emitMessage("Это последний трек в очереди")
+                }
+            }
+
+            PlaybackCommand.Previous -> {
+                val readyController = controller ?: return
+                if (readyController.hasPreviousMediaItem() || readyController.currentPosition > PREVIOUS_SEEK_THRESHOLD_MS) {
+                    readyController.seekToPreviousMediaItem()
+                } else {
+                    emitMessage("Это начало очереди")
+                }
+            }
+
+            is PlaybackCommand.SeekTo -> {
+                val readyController = controller ?: return
+                if (readyController.mediaItemCount == 0) return
+
+                val duration = readyController.duration.takeIf { it > 0L } ?: _uiState.value.durationMs
+                val target = if (duration > 0L) {
+                    command.positionMs.coerceIn(0L, duration)
+                } else {
+                    command.positionMs.coerceAtLeast(0L)
+                }
+                readyController.seekTo(target)
+            }
+
+            PlaybackCommand.ClearQueue -> {
+                val readyController = controller ?: return
+                readyController.stop()
+                readyController.clearMediaItems()
+                applyEvent(PlaybackEvent.QueueCleared())
+            }
+
+            PlaybackCommand.SyncFromController -> {
+                val readyController = controller ?: return
+                syncStateFromPlayer(readyController)
+            }
+        }
     }
 
-    private fun syncStateFromPlayer(player: Player, queueOverride: List<Track>? = null) {
-        val queue = queueOverride ?: _uiState.value.queueTracks
-        val index = player.currentMediaItemIndex
-        val currentTrack = queue.getOrNull(index)
+    private suspend fun syncStateFromPlayer(player: Player) {
+        val queueSize = machineState.queue.size
+
+        if (player.mediaItemCount == 0 && queueSize > 0) {
+            applyEvent(PlaybackEvent.QueueCleared())
+        } else if (player.mediaItemCount > 0 && player.mediaItemCount != queueSize) {
+            val restoredQueue = restoreQueueFromController(player)
+            if (restoredQueue.isNotEmpty()) {
+                applyEvent(
+                    PlaybackEvent.QueueReplaced(
+                        items = restoredQueue,
+                        startIndex = player.currentMediaItemIndex.coerceAtLeast(0),
+                        autoPlay = player.isPlaying
+                    )
+                )
+            }
+        }
+
+        val fallbackDuration = machineState.queue
+            .getOrNull(player.currentMediaItemIndex)
+            ?.durationMs
+            ?: 0L
+
+        applyEvent(
+            PlaybackEvent.Snapshot(
+                currentIndex = player.currentMediaItemIndex,
+                isPlaying = player.isPlaying,
+                status = mapStatus(player.playbackState),
+                positionMs = player.currentPosition,
+                durationMs = if (player.duration > 0L) player.duration else fallbackDuration
+            )
+        )
+    }
+
+    private suspend fun applyEvent(event: PlaybackEvent<Track>) {
+        machineMutex.withLock {
+            machineState = stateMachine.reduce(machineState, event)
+            publishUiStateLocked(machineState)
+        }
+    }
+
+    private fun publishUiStateLocked(machine: PlaybackMachineState<Track>) {
+        val currentTrack = machine.queue.getOrNull(machine.currentIndex)
         val duration = when {
-            player.duration > 0L -> player.duration
+            machine.durationMs > 0L -> machine.durationMs
             currentTrack?.durationMs != null -> currentTrack.durationMs
             else -> 0L
         }
 
-        _uiState.update {
-            it.copy(
-                queueTracks = queue,
-                currentIndex = index,
+        _uiState.update { current ->
+            val updated = current.copy(
+                queueTracks = machine.queue,
+                currentIndex = machine.currentIndex,
                 currentTrack = currentTrack,
-                isPlaying = player.isPlaying,
-                positionMs = player.currentPosition.coerceAtLeast(0L),
+                isPlaying = machine.isPlaying,
+                positionMs = machine.positionMs,
                 durationMs = duration,
-                controllerConnected = true
+                controllerConnected = machine.controllerConnected,
+                playbackStatus = machine.status,
+                canSkipPrevious = machine.currentIndex > 0,
+                canSkipNext = machine.currentIndex in 0 until (machine.queue.size - 1),
+                controlsEnabled = machine.controllerConnected && machine.queue.isNotEmpty()
             )
+
+            if (updated == current) current else updated
         }
     }
 
-    private fun restoreQueueFromController(controller: MediaController): List<Track> {
-        if (controller.mediaItemCount == 0) return _uiState.value.queueTracks
+    private fun restoreQueueFromController(player: Player): List<Track> {
+        if (player.mediaItemCount == 0) return emptyList()
 
         return buildList {
-            for (index in 0 until controller.mediaItemCount) {
-                val mediaItem = controller.getMediaItemAt(index)
+            for (index in 0 until player.mediaItemCount) {
+                val mediaItem = player.getMediaItemAt(index)
                 val mediaUri = mediaItem.localConfiguration?.uri ?: Uri.EMPTY
                 add(
                     Track(
@@ -285,28 +494,110 @@ class PlayerViewModel(
     private fun startPositionTicker() {
         positionTicker = viewModelScope.launch {
             while (isActive) {
-                mediaController?.let { controller ->
-                    if (controller.playbackState != Player.STATE_IDLE) {
-                        val knownDuration = if (controller.duration > 0L) {
-                            controller.duration
-                        } else {
-                            _uiState.value.currentTrack?.durationMs ?: 0L
-                        }
-
-                        _uiState.update {
-                            it.copy(
-                                positionMs = controller.currentPosition.coerceAtLeast(0L),
-                                durationMs = knownDuration
-                            )
-                        }
+                val controller = mediaController
+                if (controller != null) {
+                    val shouldSync = isPlayerScreenVisible || controller.isPlaying ||
+                        controller.playbackState == Player.STATE_BUFFERING
+                    if (shouldSync) {
+                        syncStateFromPlayer(controller)
                     }
                 }
-                delay(500)
+                delay(if (isPlayerScreenVisible) 700L else 1400L)
             }
         }
     }
 
+    private fun splitSupportedUris(uris: List<Uri>): Pair<List<Uri>, Int> {
+        val contentResolver = getApplication<Application>().contentResolver
+        val supported = mutableListOf<Uri>()
+        var unsupportedCount = 0
+
+        uris.forEach { uri ->
+            val mime = contentResolver.getType(uri)
+            if (mime == null || mime.startsWith("audio/", ignoreCase = true)) {
+                supported += uri
+            } else {
+                unsupportedCount += 1
+            }
+        }
+
+        return supported to unsupportedCount
+    }
+
+    private fun emitMessage(message: String) {
+        _uiState.update { current ->
+            val updated = current.copy(errorMessage = message)
+            if (updated == current) current else updated
+        }
+    }
+
+    private fun mapStatus(playbackState: Int): PlaybackStatus {
+        return when (playbackState) {
+            Player.STATE_IDLE -> PlaybackStatus.IDLE
+            Player.STATE_BUFFERING -> PlaybackStatus.BUFFERING
+            Player.STATE_READY -> PlaybackStatus.READY
+            Player.STATE_ENDED -> PlaybackStatus.ENDED
+            else -> PlaybackStatus.ERROR
+        }
+    }
+
+    private fun mapErrorReason(error: PlaybackException): PlaybackErrorReason {
+        val codeName = error.errorCodeName
+        return when {
+            codeName.contains("UNSUPPORTED", ignoreCase = true) -> PlaybackErrorReason.UNSUPPORTED_FORMAT
+            codeName.contains("MALFORMED", ignoreCase = true) -> PlaybackErrorReason.CORRUPTED_FILE
+            codeName.contains("FILE_NOT_FOUND", ignoreCase = true) ||
+                codeName.contains("NO_PERMISSION", ignoreCase = true) -> PlaybackErrorReason.FILE_UNAVAILABLE
+            codeName.contains("DECODING", ignoreCase = true) -> PlaybackErrorReason.DECODER_FAILURE
+            codeName.contains("IO", ignoreCase = true) -> PlaybackErrorReason.IO_FAILURE
+            else -> PlaybackErrorReason.UNKNOWN
+        }
+    }
+
+    private fun formatPlaybackError(reason: PlaybackErrorReason, trackTitle: String?): String {
+        val prefix = trackTitle?.let { "\"$it\": " } ?: ""
+        return when (reason) {
+            PlaybackErrorReason.UNSUPPORTED_FORMAT -> prefix + "формат не поддерживается"
+            PlaybackErrorReason.CORRUPTED_FILE -> prefix + "файл повреждён или неполный"
+            PlaybackErrorReason.FILE_UNAVAILABLE -> prefix + "файл недоступен (проверьте доступ к памяти)"
+            PlaybackErrorReason.DECODER_FAILURE -> prefix + "ошибка декодирования аудио"
+            PlaybackErrorReason.IO_FAILURE -> prefix + "ошибка чтения файла"
+            PlaybackErrorReason.UNKNOWN -> prefix + "неизвестная ошибка воспроизведения"
+        }
+    }
+
+    private fun logPlaybackErrorThrottled(error: PlaybackException) {
+        val now = System.currentTimeMillis()
+        val signature = "${error.errorCodeName}:${error.cause?.javaClass?.simpleName}"
+
+        val shouldLog = signature != lastLoggedErrorSignature ||
+            now - lastLoggedErrorAtMs > LOG_THROTTLE_WINDOW_MS
+
+        if (shouldLog) {
+            Log.e(TAG, "Playback error [${error.errorCodeName}]", error)
+            lastLoggedErrorSignature = signature
+            lastLoggedErrorAtMs = now
+        } else {
+            Log.w(TAG, "Playback error suppressed (duplicate): ${error.errorCodeName}")
+        }
+    }
+
+    private sealed interface PlaybackCommand {
+        data class ReplaceQueueAndPlay(val tracks: List<Track>, val startIndex: Int) : PlaybackCommand
+        data class AppendQueue(val tracks: List<Track>) : PlaybackCommand
+        data class PlayQueueIndex(val index: Int) : PlaybackCommand
+        data class SeekTo(val positionMs: Long) : PlaybackCommand
+
+        object TogglePlayPause : PlaybackCommand
+        object Next : PlaybackCommand
+        object Previous : PlaybackCommand
+        object ClearQueue : PlaybackCommand
+        object SyncFromController : PlaybackCommand
+    }
+
     private companion object {
         const val TAG = "PlayerViewModel"
+        const val LOG_THROTTLE_WINDOW_MS = 8_000L
+        const val PREVIOUS_SEEK_THRESHOLD_MS = 3_000L
     }
 }
