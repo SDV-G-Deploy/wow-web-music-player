@@ -76,6 +76,12 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
+      - name: Verify Android web assets are relative (white-screen guard)
+        run: |
+          sed -n '1,30p' android-app/android/app/src/main/assets/public/index.html
+          grep -q 'src="./assets/' android-app/android/app/src/main/assets/public/index.html
+          grep -q 'href="./assets/' android-app/android/app/src/main/assets/public/index.html
+
       - name: Build signed release AAB
         run: npm run build:release:aab
         working-directory: android-app

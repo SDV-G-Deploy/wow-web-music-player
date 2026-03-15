@@ -50,6 +50,12 @@ jobs:
         run: npm run sync
         working-directory: android-app
 
+      - name: Verify Android web assets are relative (white-screen guard)
+        run: |
+          sed -n '1,30p' android-app/android/app/src/main/assets/public/index.html
+          grep -q 'src="./assets/' android-app/android/app/src/main/assets/public/index.html
+          grep -q 'href="./assets/' android-app/android/app/src/main/assets/public/index.html
+
       - name: Build debug APK
         run: ./gradlew --no-daemon assembleDebug
         working-directory: android-app/android
