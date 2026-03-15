@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
-import { queueNextPosition, queuePrevPosition, shuffleKeepCurrent, type RepeatMode } from './playbackLogic';
+import {
+  queueNextPosition,
+  queuePrevPosition,
+  removeQueuePosition,
+  reorderQueue,
+  shuffleKeepCurrent,
+  type RepeatMode,
+} from './playbackLogic';
 
 type FxIntensity = 'low' | 'med' | 'high';
 type VisualPreset = 'neon' | 'calm' | 'club';
@@ -34,6 +41,27 @@ type PersistedSettings = {
   presets: Record<VisualPreset, PresetConfig>;
 };
 
+type UserPlaylistTrack = {
+  id: number;
+  kind: Track['kind'];
+  title: string;
+  artist: string;
+};
+
+type UserPlaylist = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  tracks: UserPlaylistTrack[];
+};
+
+type PersistedPlaylists = {
+  version: 1;
+  playlists: UserPlaylist[];
+};
+
+type ToastTone = 'ok' | 'warn' | 'error';
 const DEMO_TRACKS: Track[] = [
   { id: 1, title: 'Neon Drift', artist: 'Demo Tone Lab', src: './audio/neon-drift.wav', accent: '#67e8f9', artwork: './favicon.svg', kind: 'demo' },
   { id: 2, title: 'Violet Pulse', artist: 'Demo Tone Lab', src: './audio/violet-pulse.wav', accent: '#c084fc', artwork: './favicon.svg', kind: 'demo' },
@@ -47,6 +75,7 @@ const DEFAULT_PRESETS: Record<VisualPreset, PresetConfig> = {
 };
 
 const STORAGE_KEY = 'wwmp-settings-v4';
+const PLAYLIST_STORAGE_KEY = 'wwmp-user-playlists-v1';
 const ACCEPTED_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.m4a'];
 
 const FX_MULTIPLIERS: Record<FxIntensity, number> = {
@@ -129,6 +158,33 @@ const loadSettings = (): PersistedSettings => {
   }
 };
 
+const loadUserPlaylists = (): UserPlaylist[] => {
+  try {
+    const raw = localStorage.getItem(PLAYLIST_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<PersistedPlaylists>;
+    if (parsed.version !== 1 || !Array.isArray(parsed.playlists)) return [];
+
+    return parsed.playlists
+      .filter((pl) => pl && typeof pl.id === 'string' && typeof pl.name === 'string' && Array.isArray(pl.tracks))
+      .map((pl) => ({
+        id: pl.id,
+        name: pl.name.trim() || 'Untitled playlist',
+        createdAt: typeof pl.createdAt === 'string' ? pl.createdAt : new Date().toISOString(),
+        updatedAt: typeof pl.updatedAt === 'string' ? pl.updatedAt : new Date().toISOString(),
+        tracks: pl.tracks
+          .filter((t) => t && typeof t.id === 'number' && (t.kind === 'demo' || t.kind === 'local'))
+          .map((t) => ({
+            id: t.id,
+            kind: t.kind,
+            title: typeof t.title === 'string' ? t.title : 'Unknown',
+            artist: typeof t.artist === 'string' ? t.artist : 'Unknown',
+          })),
+      }));
+  } catch {
+    return [];
+  }
+};
 
 const estimateIntegratedLufs = (buffer: AudioBuffer) => {
   const blockSize = Math.max(2048, Math.floor(buffer.sampleRate * 0.4));
@@ -203,6 +259,7 @@ function App() {
   const [volume, setVolume] = useState(initial.volume);
   const [visualizerReady, setVisualizerReady] = useState(true);
   const [uploadStatus, setUploadStatus] = useState('');
+  const [toast, setToast] = useState<{ text: string; tone: ToastTone } | null>(null);
 
   const [crossfadeSec, setCrossfadeSec] = useState(initial.crossfade);
   const [shuffle, setShuffle] = useState(false);
@@ -211,6 +268,10 @@ function App() {
   const [preset, setPreset] = useState<VisualPreset>(initial.preset);
   const [presetConfigs, setPresetConfigs] = useState<Record<VisualPreset, PresetConfig>>(initial.presets);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [draggedQueuePos, setDraggedQueuePos] = useState<number | null>(null);
+  const [playlistName, setPlaylistName] = useState('');
+  const [targetPlaylistId, setTargetPlaylistId] = useState('');
+  const [userPlaylists, setUserPlaylists] = useState<UserPlaylist[]>(() => loadUserPlaylists());
 
   const [bassLevel, setBassLevel] = useState(0);
   const [midLevel, setMidLevel] = useState(0);
@@ -260,6 +321,27 @@ function App() {
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
   }, [preset, fxIntensity, crossfadeSec, repeatMode, volume, presetConfigs]);
+
+  useEffect(() => {
+    const payload: PersistedPlaylists = { version: 1, playlists: userPlaylists };
+    localStorage.setItem(PLAYLIST_STORAGE_KEY, JSON.stringify(payload));
+  }, [userPlaylists]);
+
+  useEffect(() => {
+    if (!userPlaylists.length) {
+      setTargetPlaylistId('');
+      return;
+    }
+    if (!targetPlaylistId || !userPlaylists.some((pl) => pl.id === targetPlaylistId)) {
+      setTargetPlaylistId(userPlaylists[0].id);
+    }
+  }, [userPlaylists, targetPlaylistId]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(null), 2800);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
 
   const gradientStyle = useMemo(
     () =>
@@ -313,7 +395,7 @@ function App() {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: track.title,
       artist: track.artist,
-      album: 'Wow Web Music Player v4',
+      album: 'Wow Web Music Player v5',
       artwork: track.artwork
         ? [
             { src: track.artwork, sizes: '96x96', type: 'image/svg+xml' },
@@ -964,6 +1046,79 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPlaying, queuePos, repeatMode, crossfadeSec, volume]);
 
+  const showToast = (text: string, tone: ToastTone = 'ok') => setToast({ text, tone });
+
+  const moveQueuePosition = (from: number, to: number) => {
+    if (from === to) return;
+    setQueueOrder((prev) => reorderQueue(prev, from, to));
+    setQueuePos((prevPos) => {
+      if (prevPos === from) return to;
+      if (from < prevPos && to >= prevPos) return prevPos - 1;
+      if (from > prevPos && to <= prevPos) return prevPos + 1;
+      return prevPos;
+    });
+  };
+
+  const removeFromQueue = async (position: number) => {
+    const target = queueOrder[position];
+    if (target == null) return;
+    const track = tracks[target];
+    const ok = window.confirm(`Remove "${track?.title ?? 'this track'}" from queue?`);
+    if (!ok) return;
+
+    const nextOrder = removeQueuePosition(queueOrder, position);
+    setQueueOrder(nextOrder);
+
+    if (!nextOrder.length) {
+      decksRef.current.forEach((d) => {
+        d.pause();
+        d.currentTime = 0;
+      });
+      setIsPlaying(false);
+      setQueuePos(0);
+      setProgress(0);
+      setDuration(0);
+      showToast('Queue item removed. Queue is empty now.', 'warn');
+      return;
+    }
+
+    const removedCurrent = position === queuePosRef.current;
+    setQueuePos((prev) => {
+      if (position < prev) return prev - 1;
+      if (position > prev) return prev;
+      return Math.min(prev, nextOrder.length - 1);
+    });
+
+    if (removedCurrent) {
+      decksRef.current.forEach((d) => {
+        d.pause();
+        d.currentTime = 0;
+      });
+      setIsPlaying(false);
+      setProgress(0);
+      setDuration(0);
+      showToast('Current track removed. Select a track and press Play.', 'warn');
+      return;
+    }
+
+    showToast('Track removed from queue.');
+  };
+
+  const clearQueue = () => {
+    const ok = window.confirm('Clear full queue? This cannot be undone.');
+    if (!ok) return;
+    decksRef.current.forEach((d) => {
+      d.pause();
+      d.currentTime = 0;
+    });
+    setQueueOrder([]);
+    setQueuePos(0);
+    setProgress(0);
+    setDuration(0);
+    setIsPlaying(false);
+    showToast('Queue cleared.', 'warn');
+  };
+
   const toggleShuffle = () => {
     setShuffle((prev) => {
       if (!prev) {
@@ -973,12 +1128,146 @@ function App() {
         return true;
       }
 
-      const ordered = tracks.map((_, i) => i);
+      const ordered = tracks.map((_, i) => i).filter((idx) => queueOrder.includes(idx));
       setQueueOrder(ordered);
       const nextPos = ordered.indexOf(currentTrackIndexRef.current);
       setQueuePos(Math.max(0, nextPos));
       return false;
     });
+  };
+
+  const createPlaylistFromQueue = () => {
+    const name = playlistName.trim();
+    if (!name) {
+      showToast('Enter playlist name first.', 'warn');
+      return;
+    }
+    const pl: UserPlaylist = {
+      id: `pl-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      name,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      tracks: queueOrder
+        .map((idx) => tracks[idx])
+        .filter(Boolean)
+        .map((track) => ({ id: track.id, kind: track.kind, title: track.title, artist: track.artist })),
+    };
+    setUserPlaylists((prev) => [pl, ...prev]);
+    setPlaylistName('');
+    showToast('Playlist saved locally.');
+  };
+
+  const renamePlaylist = (id: string) => {
+    const source = userPlaylists.find((pl) => pl.id === id);
+    if (!source) return;
+    const nextName = window.prompt('Rename playlist', source.name)?.trim();
+    if (!nextName) return;
+    setUserPlaylists((prev) => prev.map((pl) => (pl.id === id ? { ...pl, name: nextName, updatedAt: new Date().toISOString() } : pl)));
+    showToast('Playlist renamed.');
+  };
+
+  const deletePlaylist = (id: string) => {
+    const source = userPlaylists.find((pl) => pl.id === id);
+    if (!source) return;
+    const ok = window.confirm(`Delete playlist "${source.name}"?`);
+    if (!ok) return;
+    setUserPlaylists((prev) => prev.filter((pl) => pl.id !== id));
+    showToast('Playlist deleted.', 'warn');
+  };
+
+  const addQueueTrackToPlaylist = (position: number, playlistId: string) => {
+    const source = userPlaylists.find((pl) => pl.id === playlistId);
+    const trackIndex = queueOrder[position];
+    const track = tracks[trackIndex];
+    if (!source || !track) return;
+
+    const item: UserPlaylistTrack = {
+      id: track.id,
+      kind: track.kind,
+      title: track.title,
+      artist: track.artist,
+    };
+
+    setUserPlaylists((prev) =>
+      prev.map((pl) =>
+        pl.id === source.id
+          ? {
+              ...pl,
+              updatedAt: new Date().toISOString(),
+              tracks: [...pl.tracks, item],
+            }
+          : pl,
+      ),
+    );
+    showToast(`Added to "${source.name}".`);
+  };
+
+  const loadPlaylistToQueue = (id: string) => {
+    const source = userPlaylists.find((pl) => pl.id === id);
+    if (!source) return;
+    const trackIndexes = source.tracks
+      .map((saved) => tracks.findIndex((t) => t.id === saved.id || (t.kind === saved.kind && t.title === saved.title && t.artist === saved.artist)))
+      .filter((idx) => idx >= 0);
+
+    if (!trackIndexes.length) {
+      showToast('No matching tracks found for this playlist in current session.', 'error');
+      return;
+    }
+
+    setQueueOrder(trackIndexes);
+    setQueuePos(0);
+    setShuffle(false);
+    showToast(`Playlist loaded (${trackIndexes.length} tracks).`);
+  };
+
+  const exportPlaylists = () => {
+    const payload: PersistedPlaylists = { version: 1, playlists: userPlaylists };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'wwmp-user-playlists-v1.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('Playlists exported.');
+  };
+
+  const importPlaylists = async (file: File | null) => {
+    if (!file) return;
+    const replaceExisting = userPlaylists.length
+      ? window.confirm('Replace existing playlists with imported JSON?')
+      : true;
+    if (!replaceExisting) return;
+
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text) as PersistedPlaylists;
+      if (parsed.version !== 1 || !Array.isArray(parsed.playlists)) throw new Error('invalid');
+
+      const sanitized = parsed.playlists
+        .filter((pl) => pl && typeof pl.id === 'string' && typeof pl.name === 'string' && Array.isArray(pl.tracks))
+        .map((pl) => ({
+          id: pl.id,
+          name: pl.name.trim() || 'Untitled playlist',
+          createdAt: typeof pl.createdAt === 'string' ? pl.createdAt : new Date().toISOString(),
+          updatedAt: typeof pl.updatedAt === 'string' ? pl.updatedAt : new Date().toISOString(),
+          tracks: pl.tracks
+            .filter((t) => t && typeof t.id === 'number' && (t.kind === 'demo' || t.kind === 'local'))
+            .map((t) => ({
+              id: t.id,
+              kind: t.kind,
+              title: typeof t.title === 'string' ? t.title : 'Unknown',
+              artist: typeof t.artist === 'string' ? t.artist : 'Unknown',
+            })),
+        }));
+
+      setUserPlaylists(sanitized);
+      showToast(`Imported ${sanitized.length} playlist(s).`);
+    } catch {
+      showToast('Playlist import failed: invalid JSON.', 'error');
+    }
   };
 
   const handlePreset = (nextPreset: VisualPreset) => {
@@ -1030,12 +1319,12 @@ function App() {
     }
   };
 
-  if (!tracks.length) {
+  if (!queueOrder.length) {
     return (
       <main className="app" style={gradientStyle}>
         <section className="player-card empty-state" aria-live="polite">
           <h1>Queue is empty</h1>
-          <p>Add audio files to start playback.</p>
+          <p>Add audio files or load one of your playlists.</p>
         </section>
       </main>
     );
@@ -1048,7 +1337,7 @@ function App() {
       <div className="aurora aurora-c" />
       <section className="player-card">
         <header className="player-header">
-          <p className="eyebrow">Wow Web Music Player v5 (stabilization)</p>
+          <p className="eyebrow">Wow Web Music Player v5</p>
           <h1>{currentTrack?.title ?? 'No track'}</h1>
           <p>{currentTrack?.artist ?? '—'}</p>
         </header>
@@ -1057,6 +1346,7 @@ function App() {
         {!visualizerReady && <p className="fallback">Visualizer unavailable in this browser — audio controls still work.</p>}
         {isTransitioning && <p className="loading-state" aria-live="polite">Loading next track…</p>}
         {uploadStatus && <p className="upload-status" aria-live="polite">{uploadStatus}</p>}
+        {toast && <p className={`toast toast-${toast.tone}`} aria-live="polite">{toast.text}</p>}
 
         <div className="timeline">
           <span>{formatTime(progress)}</span>
@@ -1235,21 +1525,104 @@ function App() {
           </section>
 
           <section className="queue-box" aria-label="Queue order">
-            <p className="queue-title">Queue ({shuffle ? 'shuffled' : 'ordered'})</p>
+            <div className="queue-header-row">
+              <p className="queue-title">Queue ({shuffle ? 'shuffled' : 'ordered'})</p>
+              <button className="chip danger" onClick={clearQueue}>Clear queue</button>
+            </div>
+            <div className="queue-playlist-tools">
+              <select
+                value={targetPlaylistId}
+                onChange={(e) => setTargetPlaylistId(e.target.value)}
+                aria-label="Target playlist for queue items"
+                disabled={!userPlaylists.length}
+              >
+                {userPlaylists.length === 0 ? <option value="">Create playlist first</option> : null}
+                {userPlaylists.map((pl) => (
+                  <option key={pl.id} value={pl.id}>{pl.name}</option>
+                ))}
+              </select>
+              <span>Use +PL on any queue row</span>
+            </div>
             <ul className="playlist">
               {queueOrder.map((trackIndex, position) => {
                 const track = tracks[trackIndex];
                 if (!track) return null;
                 const isCurrent = position === queuePos;
                 return (
-                  <li key={`${track.id}-${position}`}>
+                  <li
+                    key={`${track.id}-${position}`}
+                    draggable
+                    className={draggedQueuePos === position ? 'dragging' : ''}
+                    onDragStart={() => setDraggedQueuePos(position)}
+                    onDragOver={(e) => e.preventDefault()}
+                    onDrop={() => {
+                      if (draggedQueuePos == null) return;
+                      moveQueuePosition(draggedQueuePos, position);
+                      setDraggedQueuePos(null);
+                    }}
+                    onDragEnd={() => setDraggedQueuePos(null)}
+                    onTouchStart={() => setDraggedQueuePos(position)}
+                    onTouchEnd={(e) => {
+                      const touch = e.changedTouches[0];
+                      const target = document.elementFromPoint(touch.clientX, touch.clientY)?.closest<HTMLElement>('[data-queue-pos]');
+                      const nextPos = Number(target?.dataset.queuePos ?? -1);
+                      if (draggedQueuePos != null && Number.isInteger(nextPos) && nextPos >= 0) moveQueuePosition(draggedQueuePos, nextPos);
+                      setDraggedQueuePos(null);
+                    }}
+                    data-queue-pos={position}
+                  >
                     <button className={isCurrent ? 'active' : ''} onClick={() => void selectQueuePosition(position)} aria-label={`Play ${track.title}`}>
                       <strong>{position + 1}. {track.title}</strong>
                       <span>{track.artist}</span>
                     </button>
+                    <div className="queue-actions">
+                      <button className="chip mini" onClick={() => moveQueuePosition(position, Math.max(0, position - 1))} aria-label="Move track up">↑</button>
+                      <button className="chip mini" onClick={() => moveQueuePosition(position, Math.min(queueOrder.length - 1, position + 1))} aria-label="Move track down">↓</button>
+                      <button
+                        className="chip mini"
+                        onClick={() => addQueueTrackToPlaylist(position, targetPlaylistId)}
+                        aria-label="Add track to selected playlist"
+                        disabled={!targetPlaylistId}
+                      >
+                        +PL
+                      </button>
+                      <button className="chip mini danger" onClick={() => void removeFromQueue(position)} aria-label="Remove track from queue">✕</button>
+                    </div>
                   </li>
                 );
               })}
+            </ul>
+          </section>
+
+          <section className="queue-box" aria-label="User playlists">
+            <p className="queue-title">User playlists (local-only)</p>
+            <div className="playlist-create-row">
+              <input
+                value={playlistName}
+                onChange={(e) => setPlaylistName(e.target.value)}
+                placeholder="Playlist name"
+                aria-label="Playlist name"
+              />
+              <button className="chip" onClick={createPlaylistFromQueue}>Save queue</button>
+              <button className="chip" onClick={exportPlaylists}>Export JSON</button>
+              <label className="chip import-chip">
+                Import JSON
+                <input type="file" accept="application/json,.json" onChange={(e) => void importPlaylists(e.target.files?.[0] ?? null)} />
+              </label>
+            </div>
+            <ul className="playlist">
+              {userPlaylists.map((pl) => (
+                <li key={pl.id}>
+                  <button aria-label={`Load playlist ${pl.name}`} onClick={() => loadPlaylistToQueue(pl.id)}>
+                    <strong>{pl.name}</strong>
+                    <span>{pl.tracks.length} tracks</span>
+                  </button>
+                  <div className="queue-actions">
+                    <button className="chip mini" onClick={() => renamePlaylist(pl.id)}>Rename</button>
+                    <button className="chip mini danger" onClick={() => deletePlaylist(pl.id)}>Delete</button>
+                  </div>
+                </li>
+              ))}
             </ul>
           </section>
 

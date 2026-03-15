@@ -24,3 +24,40 @@ export const shuffleKeepCurrent = (order: number[], currentTrackIndex: number) =
   }
   return [currentTrackIndex, ...rest];
 };
+
+export const reorderQueue = (order: number[], from: number, to: number) => {
+  if (from === to) return [...order];
+  if (from < 0 || to < 0 || from >= order.length || to >= order.length) return [...order];
+
+  const next = [...order];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+};
+
+export const removeQueuePosition = (order: number[], pos: number) => {
+  if (pos < 0 || pos >= order.length) return [...order];
+  return order.filter((_, idx) => idx !== pos);
+};
+
+export const moveQueueByStep = (order: number[], pos: number, dir: -1 | 1) => {
+  const target = pos + dir;
+  if (target < 0 || target >= order.length) return [...order];
+  return reorderQueue(order, pos, target);
+};
+
+export type PlaylistTrackRef = {
+  id: number;
+  kind: 'demo' | 'local';
+  title: string;
+  artist: string;
+};
+
+export type QueueTrackRef = PlaylistTrackRef;
+
+export const mapPlaylistTracksToQueueIndexes = (playlistTracks: PlaylistTrackRef[], libraryTracks: QueueTrackRef[]) =>
+  playlistTracks
+    .map((saved) =>
+      libraryTracks.findIndex((t) => t.id === saved.id || (t.kind === saved.kind && t.title === saved.title && t.artist === saved.artist)),
+    )
+    .filter((idx) => idx >= 0);

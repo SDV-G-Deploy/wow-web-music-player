@@ -1,5 +1,24 @@
 # CHANGELOG
 
+## v5
+- Playlist management v2:
+  - queue drag & drop reorder (desktop)
+  - touch drag-drop reorder target (mobile-friendly)
+  - explicit move up/down fallback controls
+  - remove track from queue (demo + local)
+  - clear queue action with confirmation
+- User playlists (local-only):
+  - create from queue, rename, delete
+  - saved in `localStorage` (`wwmp-user-playlists-v1`)
+  - load playlist back to queue in one click
+  - export/import playlists JSON
+- UX/safety updates:
+  - no server-side uploads for playlist operations
+  - confirmation dialogs for destructive actions
+  - toast statuses for saved/imported/deleted/error flows
+- Kept v4 core behavior intact (crossfade, shuffle/repeat, visual presets, media session, local upload).
+- Expanded playback/queue tests: reorder/remove/move-step logic.
+
 ## v5-pre (stabilization pass)
 - Fixed playback navigation freeze on prev/next by removing stale state usage in async/media-session/end handlers and adding transition lock + fallback error handling.
 - Synced queue/repeat/crossfade/play state via refs for stable behavior with timers and media actions.
