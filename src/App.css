@@ -8,15 +8,19 @@
 
 .app {
   --track-accent: #67e8f9;
+  --fx-bass: 0;
+  --fx-mid: 0;
+  --fx-treble: 0;
   min-height: 100vh;
   display: grid;
   place-items: center;
   padding: 1rem;
-  background: radial-gradient(circle at 15% 20%, rgba(103, 232, 249, 0.2), transparent 45%),
-    radial-gradient(circle at 80% 10%, rgba(196, 132, 252, 0.22), transparent 40%),
+  background: radial-gradient(circle at 15% 20%, rgba(103, 232, 249, calc(0.12 + var(--fx-bass) * 0.24)), transparent 45%),
+    radial-gradient(circle at 80% 10%, rgba(196, 132, 252, calc(0.16 + var(--fx-mid) * 0.24)), transparent 40%),
     linear-gradient(120deg, #0b1020 0%, #1a0f2e 55%, #2a183f 100%);
   overflow: hidden;
   position: relative;
+  transition: background 120ms linear;
 }
 
 .aurora {
@@ -25,15 +29,17 @@
   height: 50vw;
   border-radius: 999px;
   filter: blur(70px);
-  opacity: 0.32;
+  opacity: calc(0.26 + var(--fx-mid) * 0.22);
   animation: drift 16s ease-in-out infinite;
   pointer-events: none;
+  will-change: transform, opacity;
 }
 
 .aurora-a {
   top: -10vw;
   left: -10vw;
   background: #22d3ee;
+  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-bass) * 0.16));
 }
 
 .aurora-b {
@@ -41,6 +47,7 @@
   right: -10vw;
   animation-delay: -8s;
   background: #a855f7;
+  transform: translate3d(0, 0, 0) scale(calc(1 + var(--fx-treble) * 0.16));
 }
 
 @keyframes drift {
@@ -60,11 +67,12 @@
   backdrop-filter: blur(18px);
   border-radius: 28px;
   padding: clamp(1rem, 3vw, 2rem);
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 20px calc(50px + var(--fx-bass) * 22px) rgba(0, 0, 0, 0.35), 0 0 calc(20px + var(--fx-treble) * 22px)
+    color-mix(in oklab, var(--track-accent) 35%, transparent);
   color: #f4f7ff;
   position: relative;
   z-index: 2;
-  transition: border-color 320ms ease;
+  transition: border-color 220ms ease, box-shadow 120ms linear;
 }
 
 .player-card::before {
@@ -100,6 +108,7 @@
   margin: 1rem 0;
   border-radius: 14px;
   background: rgba(15, 17, 35, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.1);
 }
 
 .fallback {
@@ -152,12 +161,78 @@ input[type='range'] {
   background: color-mix(in oklab, var(--track-accent) 38%, rgba(255, 255, 255, 0.18)) !important;
 }
 
-.volume {
+.control-grid {
   display: grid;
-  grid-template-columns: 32px 1fr;
+  grid-template-columns: 1fr;
+  gap: 0.7rem;
+}
+
+.volume,
+.crossfade {
+  display: grid;
   gap: 0.6rem;
   align-items: center;
-  margin-bottom: 1rem;
+}
+
+.volume {
+  grid-template-columns: 32px 1fr;
+}
+
+.crossfade {
+  grid-template-columns: 140px 1fr;
+  font-size: 0.9rem;
+}
+
+.mode-row {
+  margin: 1rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.chip {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  padding: 0.42rem 0.8rem;
+  background: rgba(11, 15, 30, 0.42);
+  color: #eef3ff;
+  font-size: 0.82rem;
+  cursor: pointer;
+}
+
+.chip.active {
+  border-color: color-mix(in oklab, var(--track-accent) 65%, white 10%);
+  background: color-mix(in oklab, var(--track-accent) 22%, rgba(16, 19, 38, 0.92));
+}
+
+.fx-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: default;
+}
+
+.fx-chip select {
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.22);
+  color: #fff;
+  padding: 0.2rem 0.45rem;
+}
+
+.queue-box {
+  background: rgba(10, 14, 30, 0.35);
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 0.7rem;
+}
+
+.queue-title {
+  margin: 0 0 0.55rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: color-mix(in oklab, var(--track-accent) 64%, white 36%);
 }
 
 .playlist {
@@ -222,6 +297,10 @@ input[type='range'] {
   .play-btn {
     width: 58px !important;
     height: 58px !important;
+  }
+
+  .crossfade {
+    grid-template-columns: 1fr;
   }
 
   .playlist button {
