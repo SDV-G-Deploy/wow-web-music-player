@@ -5,6 +5,7 @@ import com.sdv.wowplayer.core.model.Track
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.mockito.Mockito
 
 class PlaybackSessionRestorePolicyTest {
 
@@ -72,7 +73,13 @@ class PlaybackSessionRestorePolicyTest {
             title = "track-$id",
             artist = "artist",
             durationMs = 1000L,
-            uri = Uri.EMPTY
+            uri = mockUri("content://tracks/$id")
         )
+    }
+
+    private fun mockUri(value: String): Uri {
+        val uri = Mockito.mock(Uri::class.java)
+        Mockito.`when`(uri.toString()).thenReturn(value)
+        return uri
     }
 }
