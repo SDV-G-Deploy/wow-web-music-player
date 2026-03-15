@@ -253,7 +253,8 @@ class PlayerViewModel(
     }
 
     private fun enqueueCommand(command: PlaybackCommand) {
-        commandChannel.trySend(command).onFailure {
+        val result = commandChannel.trySend(command)
+        if (result.isFailure) {
             Log.w(TAG, "Dropping command: $command")
         }
     }
