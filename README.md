@@ -105,22 +105,95 @@ npm ci || npm install
 npm run build:debug
 ```
 
-APK output:
+Debug APK output:
 
 ```text
 android-app/android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-### Install to phone
+### Release signing setup (local)
+
+Create keystore (example):
+
+```bash
+keytool -genkeypair \
+  -v \
+  -keystore release-keystore.jks \
+  -alias release \
+  -keyalg RSA \
+  -keysize 2048 \
+  -validity 10000
+```
+
+Provide signing values in one of these ways:
+
+1) Environment variables
+```bash
+export ANDROID_KEYSTORE_PATH="/absolute/path/to/release-keystore.jks"
+export ANDROID_KEYSTORE_PASSWORD="***"
+export ANDROID_KEY_ALIAS="release"
+export ANDROID_KEY_PASSWORD="***"
+```
+
+2) Local file (gitignored): `android-app/android/keystore.properties`
+```properties
+ANDROID_KEYSTORE_PATH=/absolute/path/to/release-keystore.jks
+ANDROID_KEYSTORE_PASSWORD=***
+ANDROID_KEY_ALIAS=release
+ANDROID_KEY_PASSWORD=***
+```
+
+### Build signed release APK / AAB
+
+From repo root:
+
+```bash
+npm run android:release:apk
+npm run android:release:aab
+```
+
+Or directly in `android-app/`:
+
+```bash
+npm run build:release:apk
+npm run build:release:aab
+```
+
+Release outputs:
+
+```text
+android-app/android/app/build/outputs/apk/release/app-release.apk
+android-app/android/app/build/outputs/bundle/release/app-release.aab
+```
+
+### GitHub Actions release workflow + secrets
+
+Workflow: `.github/workflows/android-release.yml`
+
+Required repository secrets:
+- `ANDROID_KEYSTORE_BASE64` — base64 of `release-keystore.jks`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Generate base64 (Linux/macOS):
+
+```bash
+base64 -w 0 release-keystore.jks
+```
+
+The workflow fails fast with explicit error messages if any signing secret is missing.
+
+### Install release APK to phone
 
 Using ADB:
 
 ```bash
-adb install -r android-app/android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android-app/android/app/build/outputs/apk/release/app-release.apk
 ```
 
 Or manually:
-1. Copy `app-debug.apk` to phone
+1. Copy `app-release.apk` to phone
 2. Open it in file manager
 3. Allow installation from unknown sources (one-time)
 4. Install

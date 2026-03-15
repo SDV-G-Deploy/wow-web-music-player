@@ -7,7 +7,9 @@
     "prepare:web": "node scripts/prepare-web.mjs",
     "sync": "npm run prepare:web && npx cap sync android",
     "open": "npm run sync && npx cap open android",
-    "build:debug": "npm run sync && cd android && ./gradlew assembleDebug"
+    "build:debug": "npm run sync && cd android && ./gradlew assembleDebug",
+    "build:release:apk": "npm run sync && cd android && ./gradlew assembleRelease",
+    "build:release:aab": "npm run sync && cd android && ./gradlew bundleRelease"
   },
   "dependencies": {
     "@capacitor/android": "^8.2.0",

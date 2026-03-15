@@ -10,7 +10,10 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "test:playback": "node --import tsx --test tests/playback-navigation.test.ts"
+    "test:playback": "node --import tsx --test tests/playback-navigation.test.ts",
+    "android:debug": "npm --prefix android-app run build:debug",
+    "android:release:apk": "npm --prefix android-app run build:release:apk",
+    "android:release:aab": "npm --prefix android-app run build:release:aab"
   },
   "dependencies": {
     "react": "^19.2.4",

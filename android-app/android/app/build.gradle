@@ -1,5 +1,51 @@
 apply plugin: 'com.android.application'
 
+import java.util.Properties
+
+// Local (non-committed) signing file: android-app/android/keystore.properties
+// Example keys:
+// ANDROID_KEYSTORE_PATH=/absolute/path/to/release-keystore.jks
+// ANDROID_KEYSTORE_PASSWORD=...
+// ANDROID_KEY_ALIAS=...
+// ANDROID_KEY_PASSWORD=...
+def localKeystoreProps = new Properties()
+def localKeystorePropsFile = rootProject.file('keystore.properties')
+if (localKeystorePropsFile.exists()) {
+    localKeystorePropsFile.withInputStream { stream ->
+        localKeystoreProps.load(stream)
+    }
+}
+
+def resolveSigningValue = { String key ->
+    def envValue = System.getenv(key)
+    if (envValue != null && !envValue.toString().trim().isEmpty()) {
+        return envValue.toString().trim()
+    }
+
+    def gradlePropValue = project.findProperty(key)
+    if (gradlePropValue != null && !gradlePropValue.toString().trim().isEmpty()) {
+        return gradlePropValue.toString().trim()
+    }
+
+    def localValue = localKeystoreProps.getProperty(key)
+    if (localValue != null && !localValue.toString().trim().isEmpty()) {
+        return localValue.toString().trim()
+    }
+
+    return null
+}
+
+def releaseKeystorePath = resolveSigningValue('ANDROID_KEYSTORE_PATH')
+def releaseKeystorePassword = resolveSigningValue('ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = resolveSigningValue('ANDROID_KEY_ALIAS')
+def releaseKeyPassword = resolveSigningValue('ANDROID_KEY_PASSWORD')
+def hasReleaseSigning = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+].every { it != null && !it.toString().trim().isEmpty() }
+
 android {
     namespace = "com.sdv.wowmusicplayer"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -16,11 +62,38 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
         }
+    }
+}
+
+gradle.taskGraph.whenReady { graph ->
+    def releaseRequested = graph.allTasks.any { task ->
+        task.name == 'assembleRelease' || task.name == 'bundleRelease'
+    }
+
+    if (releaseRequested && !hasReleaseSigning) {
+        throw new GradleException(
+            "Missing Android release signing config. Provide ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD via env vars, Gradle properties, or android-app/android/keystore.properties"
+        )
     }
 }
 
