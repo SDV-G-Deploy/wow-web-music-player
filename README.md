@@ -1,129 +1,161 @@
-# Wow Web Music Player v4 🎧⚡
+# Wow Web Music Player (pre-v5 stabilization)
 
-Showcase-grade web music player on **Vite + React + TypeScript**, optimized for **GitHub Pages**.
+Web music player on **Vite + React + TypeScript** with dual-deck playback, crossfade, visual presets, queue/shuffle/repeat, and local file upload.
 
-- Dual-deck playback with smooth crossfade
-- Upgraded loudness leveling with integrated-LUFS-style analysis (web-friendly, no heavy deps)
-- Visual preset editor + JSON export/import
-- Local music upload (multiple files, browser-only)
-- Persistent settings in `localStorage`
-
-![Screenshot](./docs/screenshot.png)
+Live demo (Pages): **https://SDV-G-Deploy.github.io/wow-web-music-player/**
 
 ---
 
-## Live Demo
+## Quick start
 
-- **GitHub Pages:** https://SDV-G-Deploy.github.io/wow-web-music-player/
-
----
-
-## What’s new in v4
-
-### 1) Loudness leveling upgrade
-- Reworked loudness estimation to an integrated-LUFS-style approach with block gating (absolute + relative gate)
-- Per-track compensation target around `-16 LUFS` with safe gain limits
-- Keeps transition smoothness: crossfade ramps + micro-ramp safety for `crossfade=0`
-- Lightweight and web-native (Web Audio API only)
-
-### 2) Preset editor + JSON export/import
-- Preset editor for key visual parameters:
-  - palette (3 colors)
-  - default FX intensity
-  - motion multiplier
-  - animation speed multiplier
-- Export presets to JSON (`wwmp-presets-v4.json`)
-- Import JSON back into the player
-
-### 3) Upload your own music (local-only)
-- `+ Add your music` button supports **multiple files**
-- Supported formats (browser/codec dependent):
-  - `.mp3`
-  - `.wav`
-  - `.ogg`
-  - `.m4a`
-- Files are never uploaded to server
-- Added local tracks join the same queue and work with existing features:
-  - crossfade
-  - repeat/shuffle
-  - visualizer
-  - Media Session API (where browser supports it)
-- Broken/unsupported files are skipped with readable status
-
-### 4) UX/stability polish
-- Added upload/progress status messages
-- Preserved existing visual style and mobile layout
-- Improved error handling around file validation/loading
-
----
-
-## Privacy model
-
-Local tracks are processed **only in your browser**:
-- No backend upload
-- No cloud analysis
-- No server-side storage
-
-Notes:
-- Browser codec support varies by platform (especially `.m4a` and some `.ogg` variants)
-- Very large files may analyze more slowly on low-power devices
-
----
-
-## Features
-
-- ▶️ Play / Pause
-- ⏮ / ⏭ Previous / Next
-- ⏱ Seek bar with current / total time
-- 🔊 Volume slider
-- 🎚 Crossfade slider (0–8s)
-- 🔀 Shuffle
-- 🔁 Repeat mode cycle (`off → all → one`)
-- 🌈 Visual presets (`Neon / Calm / Club`)
-- 🛠 Preset editor + export/import JSON
-- 📁 Local music upload (multiple)
-- ⌨️ Keyboard shortcuts:
-  - `Space` — play/pause
-  - `←/→` — seek ±5s
-  - `N` / `P` — next/previous track
-  - `S` — shuffle on/off
-  - `R` — repeat mode cycle
-  - `M` — mute/unmute
-
----
-
-## Local run
+### Local development
 
 ```bash
 git clone https://github.com/SDV-G-Deploy/wow-web-music-player.git
 cd wow-web-music-player
-npm install
+npm ci || npm install
 npm run dev
 ```
 
-Open: http://localhost:5173
+Open: `http://localhost:5173`
 
----
-
-## Build / preview
+### Production build + local preview
 
 ```bash
 npm run build
 npm run preview
 ```
 
----
+By default preview is available at `http://localhost:4173`.
 
-## Deployment (GitHub Pages)
-
-Workflow: `.github/workflows/deploy.yml`
+### GitHub Pages deploy
 
 1. Push to `main`
-2. GitHub Actions runs `npm ci` + `npm run build`
-3. Deploys `dist/` to GitHub Pages
+2. GitHub Actions workflow `.github/workflows/deploy.yml` runs build
+3. `dist/` is published to Pages
+
+---
+
+## Features
+
+### Playback
+- Play / pause
+- Previous / next
+- Progress seek bar
+- Volume slider
+- Crossfade `0..8s`
+- Queue with click-to-jump
+- Shuffle (preserve current track at queue head)
+- Repeat: `off → all → one`
+
+### Visuals
+- Real-time visualizer (Web Audio Analyser)
+- Presets: `Neon`, `Calm`, `Club`
+- Preset editor:
+  - 3 colors (C1/C2/C3)
+  - default FX intensity
+  - motion multiplier
+  - animation multiplier
+- Export presets to JSON
+- Import presets from JSON
+
+### Device integration
+- Media Session metadata and position state
+- Media Session actions (`play`, `pause`, `prev`, `next`) where supported
+
+### Local music upload
+- Multi-file upload (browser-only)
+- Supported extensions (actual support depends on browser codecs):
+  - `.mp3`
+  - `.wav`
+  - `.ogg`
+  - `.m4a`
+
+---
+
+## Keyboard shortcuts
+
+- `Space` — play/pause
+- `←` / `→` — seek `-5s / +5s`
+- `N` — next track
+- `P` — previous track
+- `S` — shuffle on/off
+- `R` — cycle repeat mode
+- `M` — mute/unmute (toggle with preset level)
+
+---
+
+## Local music upload: how-to
+
+1. Click **Show advanced controls**
+2. Press **+ Add your music**
+3. Select one or multiple files
+4. Wait for validation status text
+5. Added tracks appear in queue and are fully playable with crossfade/modes
+
+Notes:
+- Files are not uploaded to any server.
+- On unsupported codecs the file is skipped with error status.
+
+---
+
+## Presets editor + export/import
+
+### Edit preset
+1. Choose preset chip (`Neon/Calm/Club`)
+2. Open advanced controls → **Preset editor**
+3. Adjust C1/C2/C3, Motion, Animation, Default FX
+
+### Export presets
+- Click **Export JSON** to download `wwmp-presets-v4.json`
+
+### Import presets
+- Click **Import JSON** and choose previously exported file
+- Invalid JSON/schema is rejected with user-friendly status
+
+---
+
+## Known limitations
+
+- **Codec support is browser-dependent**: especially `.m4a` / some `.ogg` variants
+- **Autoplay policy**: playback may require explicit user gesture before `audio.play()` succeeds
+- **Media Session API** differences across browsers/OS (metadata artwork/actions may vary)
+- **Very large local files** can take noticeable time for decode/loudness analysis on low-power devices
+
+---
+
+## Troubleshooting playback
+
+### Next/Prev pressed but no sound
+- Ensure at least one track is loaded and not blocked by codec compatibility
+- Toggle play once after first interaction to satisfy autoplay policy
+- Set crossfade to `0` and retry (helps isolate crossfade timing issues)
+
+### Track switches but timeline freezes
+- Re-open the tab and trigger playback with a click (resumes audio context)
+- Check browser console for decode/media errors
+
+### Imported files are skipped
+- Confirm extensions are supported
+- Try converting problematic files to `.mp3` or `.wav`
+
+### Media keys not working
+- Browser/OS may ignore Media Session handlers for background tabs
+- Keep tab active and verify browser supports Media Session API
+
+---
+
+## Quality checks used in this repo
+
+```bash
+npm ci || npm install
+npm run test:playback
+npm run build
+npm run preview
+```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE)
+MIT — see `LICENSE`

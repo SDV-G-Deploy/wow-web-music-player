@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
+import { queueNextPosition, queuePrevPosition, shuffleKeepCurrent, type RepeatMode } from './playbackLogic';
 
-type RepeatMode = 'off' | 'all' | 'one';
 type FxIntensity = 'low' | 'med' | 'high';
 type VisualPreset = 'neon' | 'calm' | 'club';
 
@@ -129,30 +129,6 @@ const loadSettings = (): PersistedSettings => {
   }
 };
 
-const queueNextPosition = (pos: number, mode: RepeatMode, orderLength: number) => {
-  if (mode === 'one') return pos;
-  const next = pos + 1;
-  if (next < orderLength) return next;
-  if (mode === 'all') return 0;
-  return -1;
-};
-
-const queuePrevPosition = (pos: number, mode: RepeatMode, orderLength: number) => {
-  if (mode === 'one') return pos;
-  const prev = pos - 1;
-  if (prev >= 0) return prev;
-  if (mode === 'all') return orderLength - 1;
-  return -1;
-};
-
-const shuffleKeepCurrent = (order: number[], currentTrackIndex: number) => {
-  const rest = order.filter((item) => item !== currentTrackIndex);
-  for (let i = rest.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [rest[i], rest[j]] = [rest[j], rest[i]];
-  }
-  return [currentTrackIndex, ...rest];
-};
 
 const estimateIntegratedLufs = (buffer: AudioBuffer) => {
   const blockSize = Math.max(2048, Math.floor(buffer.sampleRate * 0.4));
@@ -205,6 +181,10 @@ function App() {
   const deckTrackRef = useRef<[number | null, number | null]>([null, null]);
   const activeDeckRef = useRef<0 | 1>(0);
   const currentTrackIndexRef = useRef(0);
+  const queuePosRef = useRef(0);
+  const queueOrderRef = useRef<number[]>(DEMO_TRACKS.map((_, i) => i));
+  const repeatModeRef = useRef<RepeatMode>(initial.repeat);
+  const crossfadeSecRef = useRef(initial.crossfade);
   const crossfadeTimerRef = useRef<number | null>(null);
   const loudnessTimerRef = useRef<number | null>(null);
   const loudnessMapRef = useRef<Record<number, number>>({});
@@ -215,7 +195,9 @@ function App() {
   const [queuePos, setQueuePos] = useState(0);
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const isPlayingRef = useRef(false);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const isTransitioningRef = useRef(false);
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(initial.volume);
@@ -228,6 +210,7 @@ function App() {
   const [fxIntensity, setFxIntensity] = useState<FxIntensity>(initial.intensity);
   const [preset, setPreset] = useState<VisualPreset>(initial.preset);
   const [presetConfigs, setPresetConfigs] = useState<Record<VisualPreset, PresetConfig>>(initial.presets);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
   const [bassLevel, setBassLevel] = useState(0);
   const [midLevel, setMidLevel] = useState(0);
@@ -240,6 +223,30 @@ function App() {
   useEffect(() => {
     currentTrackIndexRef.current = currentTrackIndex;
   }, [currentTrackIndex]);
+
+  useEffect(() => {
+    queuePosRef.current = queuePos;
+  }, [queuePos]);
+
+  useEffect(() => {
+    queueOrderRef.current = queueOrder;
+  }, [queueOrder]);
+
+  useEffect(() => {
+    repeatModeRef.current = repeatMode;
+  }, [repeatMode]);
+
+  useEffect(() => {
+    crossfadeSecRef.current = crossfadeSec;
+  }, [crossfadeSec]);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
+
+  useEffect(() => {
+    isTransitioningRef.current = isTransitioning;
+  }, [isTransitioning]);
 
   useEffect(() => {
     const payload: PersistedSettings = {
@@ -537,11 +544,11 @@ function App() {
     clearCrossfadeTimer();
     const activeDeck = decksRef.current[activeDeckRef.current];
     const remain = (activeDeck.duration || 0) - (activeDeck.currentTime || 0);
-    const nextPos = queueNextPosition(position, repeatMode, queueOrder.length);
+    const nextPos = queueNextPosition(position, repeatModeRef.current, queueOrder.length);
     const validNext = nextPos >= 0 && nextPos !== position;
-    const fade = clampCrossfade(crossfadeSec);
+    const fade = clampCrossfade(crossfadeSecRef.current);
 
-    if (!isPlaying || !validNext || fade <= 0 || !Number.isFinite(remain) || remain <= fade + 0.06) return;
+    if (!isPlayingRef.current || !validNext || fade <= 0 || !Number.isFinite(remain) || remain <= fade + 0.06) return;
 
     crossfadeTimerRef.current = window.setTimeout(() => {
       void transitionToPosition(nextPos, true);
@@ -582,7 +589,7 @@ function App() {
   };
 
   const prewarmNextDeck = async (fromPosition: number) => {
-    const nextPos = queueNextPosition(fromPosition, repeatMode, queueOrder.length);
+    const nextPos = queueNextPosition(fromPosition, repeatModeRef.current, queueOrder.length);
     if (nextPos < 0) return;
 
     const nextTrackIndex = queueOrder[nextPos];
@@ -591,77 +598,86 @@ function App() {
   };
 
   const transitionToPosition = async (nextPos: number, crossfade: boolean) => {
+    if (isTransitioningRef.current) return;
     if (nextPos < 0 || nextPos >= queueOrder.length) {
       setIsPlaying(false);
       return;
     }
 
+    isTransitioningRef.current = true;
     setIsTransitioning(true);
 
-    const nextTrackIndex = queueOrder[nextPos];
-    const fromDeckIndex = activeDeckRef.current;
-    const toDeckIndex: 0 | 1 = fromDeckIndex === 0 ? 1 : 0;
+    try {
+      const nextTrackIndex = queueOrder[nextPos];
+      const fromDeckIndex = activeDeckRef.current;
+      const toDeckIndex: 0 | 1 = fromDeckIndex === 0 ? 1 : 0;
 
-    const fromDeck = decksRef.current[fromDeckIndex];
-    const toDeck = decksRef.current[toDeckIndex];
+      const fromDeck = decksRef.current[fromDeckIndex];
+      const toDeck = decksRef.current[toDeckIndex];
 
-    const canUseGraph = ensureAudioGraph();
-    if (canUseGraph) await audioCtxRef.current?.resume();
+      const canUseGraph = ensureAudioGraph();
+      if (canUseGraph) await audioCtxRef.current?.resume();
 
-    await prepareDeck(toDeckIndex, nextTrackIndex);
+      await prepareDeck(toDeckIndex, nextTrackIndex);
 
-    const fade = clampCrossfade(crossfadeSec);
-    const useCrossfade = crossfade && fade > 0 && !fromDeck.paused;
+      const fade = clampCrossfade(crossfadeSecRef.current);
+      const useCrossfade = crossfade && fade > 0 && !fromDeck.paused;
 
-    setQueuePos(nextPos);
-    setProgress(0);
-    setDuration(toDeck.duration || 0);
+      setQueuePos(nextPos);
+      setProgress(0);
+      setDuration(toDeck.duration || 0);
 
-    if (canUseGraph) {
-      const ctx = audioCtxRef.current!;
-      const now = ctx.currentTime;
-      const fromGain = gainNodesRef.current[fromDeckIndex].gain;
-      const toGain = gainNodesRef.current[toDeckIndex].gain;
-      const targetTo = Math.max(0.001, Math.min(1.9, loudnessMapRef.current[nextTrackIndex] ?? 1));
+      if (canUseGraph) {
+        const ctx = audioCtxRef.current!;
+        const now = ctx.currentTime;
+        const fromGain = gainNodesRef.current[fromDeckIndex].gain;
+        const toGain = gainNodesRef.current[toDeckIndex].gain;
+        const targetTo = Math.max(0.001, Math.min(1.9, loudnessMapRef.current[nextTrackIndex] ?? 1));
 
-      fromGain.cancelScheduledValues(now);
-      toGain.cancelScheduledValues(now);
+        fromGain.cancelScheduledValues(now);
+        toGain.cancelScheduledValues(now);
+
+        if (useCrossfade) {
+          toGain.setValueAtTime(0.001, now);
+          toGain.exponentialRampToValueAtTime(targetTo, now + fade);
+          fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
+          fromGain.exponentialRampToValueAtTime(0.001, now + fade);
+        } else {
+          toGain.setValueAtTime(0.001, now);
+          toGain.exponentialRampToValueAtTime(targetTo, now + 0.018);
+          fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
+          fromGain.exponentialRampToValueAtTime(0.001, now + 0.018);
+        }
+      }
+
+      await toDeck.play();
+      setIsPlaying(true);
 
       if (useCrossfade) {
-        toGain.setValueAtTime(0.001, now);
-        toGain.exponentialRampToValueAtTime(targetTo, now + fade);
-        fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
-        fromGain.exponentialRampToValueAtTime(0.001, now + fade);
+        window.setTimeout(() => {
+          fromDeck.pause();
+          fromDeck.currentTime = 0;
+        }, fade * 1000 + 40);
       } else {
-        toGain.setValueAtTime(0.001, now);
-        toGain.exponentialRampToValueAtTime(targetTo, now + 0.018);
-        fromGain.setValueAtTime(Math.max(0.001, fromGain.value || 1), now);
-        fromGain.exponentialRampToValueAtTime(0.001, now + 0.018);
-      }
-    }
-
-    await toDeck.play();
-    setIsPlaying(true);
-
-    if (useCrossfade) {
-      window.setTimeout(() => {
         fromDeck.pause();
         fromDeck.currentTime = 0;
-      }, fade * 1000 + 40);
-    } else {
-      fromDeck.pause();
-      fromDeck.currentTime = 0;
-    }
+      }
 
-    activeDeckRef.current = toDeckIndex;
-    stopProgressLoop();
-    progressLoop();
-    drawVisualizer();
-    startLoudnessMonitor();
-    updateMediaSession(nextTrackIndex, true);
-    scheduleAutoCrossfade(nextPos);
-    void prewarmNextDeck(nextPos);
-    setIsTransitioning(false);
+      activeDeckRef.current = toDeckIndex;
+      stopProgressLoop();
+      progressLoop();
+      drawVisualizer();
+      startLoudnessMonitor();
+      updateMediaSession(nextTrackIndex, true);
+      scheduleAutoCrossfade(nextPos);
+      void prewarmNextDeck(nextPos);
+    } catch {
+      setIsPlaying(false);
+      updateMediaSession(currentTrackIndexRef.current, false);
+    } finally {
+      isTransitioningRef.current = false;
+      setIsTransitioning(false);
+    }
   };
 
   const selectQueuePosition = async (position: number) => {
@@ -679,9 +695,17 @@ function App() {
   };
 
   const nextTrack = async () => {
-    const nextPos = queueNextPosition(queuePos, repeatMode, queueOrder.length);
+    const currentPos = queuePosRef.current;
+    const nextPos = queueNextPosition(currentPos, repeatModeRef.current, queueOrder.length);
     if (nextPos < 0) {
       setIsPlaying(false);
+      return;
+    }
+    if (!isPlayingRef.current) {
+      setQueuePos(nextPos);
+      setProgress(0);
+      setDuration(0);
+      updateMediaSession(queueOrder[nextPos], false);
       return;
     }
     await transitionToPosition(nextPos, true);
@@ -689,16 +713,24 @@ function App() {
 
   const prevTrack = async () => {
     const activeDeck = decksRef.current[activeDeckRef.current];
-    if ((activeDeck.currentTime || 0) > 2.5 && repeatMode !== 'one') {
+    if ((activeDeck.currentTime || 0) > 2.5 && repeatModeRef.current !== 'one') {
       activeDeck.currentTime = 0;
       setProgress(0);
       return;
     }
 
-    const prevPos = queuePrevPosition(queuePos, repeatMode, queueOrder.length);
+    const prevPos = queuePrevPosition(queuePosRef.current, repeatModeRef.current, queueOrder.length);
     if (prevPos < 0) {
       activeDeck.currentTime = 0;
       setProgress(0);
+      return;
+    }
+
+    if (!isPlayingRef.current) {
+      setQueuePos(prevPos);
+      setProgress(0);
+      setDuration(0);
+      updateMediaSession(queueOrder[prevPos], false);
       return;
     }
 
@@ -735,8 +767,8 @@ function App() {
     stopProgressLoop();
     progressLoop();
     updateMediaSession(currentTrackIndexRef.current, true);
-    scheduleAutoCrossfade(queuePos);
-    void prewarmNextDeck(queuePos);
+    scheduleAutoCrossfade(queuePosRef.current);
+    void prewarmNextDeck(queuePosRef.current);
   };
 
   const applyVolume = (nextVolume: number) => {
@@ -829,8 +861,9 @@ function App() {
     const deckB = decksRef.current[1];
 
     const onEnded = () => {
-      if (crossfadeSec > 0) return;
-      const nextPos = queueNextPosition(queuePos, repeatMode, queueOrder.length);
+      if (crossfadeSecRef.current > 0) return;
+      const order = queueOrderRef.current;
+      const nextPos = queueNextPosition(queuePosRef.current, repeatModeRef.current, order.length);
       if (nextPos < 0) {
         setIsPlaying(false);
         return;
@@ -1012,9 +1045,10 @@ function App() {
     <main className="app" style={gradientStyle}>
       <div className="aurora aurora-a" />
       <div className="aurora aurora-b" />
+      <div className="aurora aurora-c" />
       <section className="player-card">
         <header className="player-header">
-          <p className="eyebrow">Wow Web Music Player v4</p>
+          <p className="eyebrow">Wow Web Music Player v5 (stabilization)</p>
           <h1>{currentTrack?.title ?? 'No track'}</h1>
           <p>{currentTrack?.artist ?? '—'}</p>
         </header>
@@ -1023,22 +1057,6 @@ function App() {
         {!visualizerReady && <p className="fallback">Visualizer unavailable in this browser — audio controls still work.</p>}
         {isTransitioning && <p className="loading-state" aria-live="polite">Loading next track…</p>}
         {uploadStatus && <p className="upload-status" aria-live="polite">{uploadStatus}</p>}
-
-        <div className="upload-zone">
-          <label className="upload-btn">
-            + Add your music
-            <input
-              type="file"
-              accept=".mp3,.wav,.ogg,.m4a,audio/*"
-              multiple
-              onChange={(e) => {
-                void handleLocalFiles(e.target.files);
-                e.target.value = '';
-              }}
-            />
-          </label>
-          <p>Local only in your browser. Supported: mp3, wav, ogg, m4a (codec support depends on browser).</p>
-        </div>
 
         <div className="timeline">
           <span>{formatTime(progress)}</span>
@@ -1053,7 +1071,7 @@ function App() {
               const time = Number(e.target.value);
               deck.currentTime = time;
               setProgress(time);
-              scheduleAutoCrossfade(queuePos);
+              scheduleAutoCrossfade(queuePosRef.current);
             }}
             aria-label="Track position"
           />
@@ -1082,148 +1100,168 @@ function App() {
           ))}
         </div>
 
-        <section className="preset-editor" aria-label="Preset editor">
-          <p className="queue-title">Preset editor ({presetConfigs[preset].label})</p>
-          <div className="preset-colors">
-            {presetConfigs[preset].palette.map((c, i) => (
-              <label key={`${preset}-${i}`} className="color-row">
-                C{i + 1}
-                <input
-                  type="color"
-                  value={c}
-                  onChange={(e) => {
-                    const next = [...presetConfigs[preset].palette] as [string, string, string];
-                    next[i] = e.target.value;
-                    updatePresetField({ palette: next });
-                  }}
-                />
-              </label>
-            ))}
+        <details className="advanced-panel" open={advancedOpen} onToggle={(e) => setAdvancedOpen((e.target as HTMLDetailsElement).open)}>
+          <summary>{advancedOpen ? 'Hide advanced controls' : 'Show advanced controls'}</summary>
+
+          <div className="upload-zone">
+            <label className="upload-btn">
+              + Add your music
+              <input
+                type="file"
+                accept=".mp3,.wav,.ogg,.m4a,audio/*"
+                multiple
+                onChange={(e) => {
+                  void handleLocalFiles(e.target.files);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+            <p>Local only in your browser. Supported: mp3, wav, ogg, m4a (codec support depends on browser).</p>
           </div>
-          <div className="preset-sliders">
-            <label>
-              Motion {presetConfigs[preset].motion.toFixed(2)}
+
+          <div className="control-grid">
+            <label className="volume">
+              <span>🔊</span>
               <input
                 type="range"
-                min={0.45}
-                max={1.8}
+                min={0}
+                max={1}
                 step={0.01}
-                value={presetConfigs[preset].motion}
-                onChange={(e) => updatePresetField({ motion: clampMotion(Number(e.target.value)) })}
+                value={volume}
+                onChange={(e) => applyVolume(Number(e.target.value))}
+                aria-label="Volume"
               />
             </label>
-            <label>
-              Animation {presetConfigs[preset].animation.toFixed(2)}
+
+            <label className="crossfade">
+              <span>Crossfade {crossfadeSec.toFixed(1)}s</span>
               <input
                 type="range"
-                min={0.45}
-                max={1.8}
-                step={0.01}
-                value={presetConfigs[preset].animation}
-                onChange={(e) => updatePresetField({ animation: clampMotion(Number(e.target.value)) })}
+                min={0}
+                max={8}
+                step={0.5}
+                value={crossfadeSec}
+                onChange={(e) => setCrossfadeSec(clampCrossfade(Number(e.target.value)))}
+                aria-label="Crossfade duration"
               />
             </label>
-            <label>
-              Default FX
-              <select
-                value={presetConfigs[preset].defaultIntensity}
-                onChange={(e) => updatePresetField({ defaultIntensity: e.target.value as FxIntensity })}
-              >
+          </div>
+
+          <div className="mode-row" role="group" aria-label="Playback modes">
+            <button className={shuffle ? 'chip active' : 'chip'} onClick={toggleShuffle} aria-pressed={shuffle} aria-label="Toggle shuffle mode">
+              Shuffle {shuffle ? 'On' : 'Off'}
+            </button>
+            <button
+              className="chip"
+              onClick={() => setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))}
+              aria-label="Toggle repeat mode"
+            >
+              Repeat: {repeatMode}
+            </button>
+            <label className="chip fx-chip" aria-label="Effect intensity selector">
+              FX
+              <select value={fxIntensity} onChange={(e) => setFxIntensity(e.target.value as FxIntensity)} aria-label="Effect intensity">
                 <option value="low">low</option>
                 <option value="med">med</option>
                 <option value="high">high</option>
               </select>
             </label>
           </div>
-          <div className="preset-actions">
-            <button className="chip" onClick={exportPresets}>Export JSON</button>
-            <label className="chip import-chip">
-              Import JSON
-              <input
-                type="file"
-                accept="application/json,.json"
-                onChange={(e) => void importPresets(e.target.files?.[0] ?? null)}
-              />
-            </label>
-          </div>
-        </section>
 
-        <div className="control-grid">
-          <label className="volume">
-            <span>🔊</span>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={volume}
-              onChange={(e) => applyVolume(Number(e.target.value))}
-              aria-label="Volume"
-            />
-          </label>
+          <section className="preset-editor" aria-label="Preset editor">
+            <p className="queue-title">Preset editor ({presetConfigs[preset].label})</p>
+            <div className="preset-colors">
+              {presetConfigs[preset].palette.map((c, i) => (
+                <label key={`${preset}-${i}`} className="color-row">
+                  C{i + 1}
+                  <input
+                    type="color"
+                    value={c}
+                    onChange={(e) => {
+                      const next = [...presetConfigs[preset].palette] as [string, string, string];
+                      next[i] = e.target.value;
+                      updatePresetField({ palette: next });
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+            <div className="preset-sliders">
+              <label>
+                Motion {presetConfigs[preset].motion.toFixed(2)}
+                <input
+                  type="range"
+                  min={0.45}
+                  max={1.8}
+                  step={0.01}
+                  value={presetConfigs[preset].motion}
+                  onChange={(e) => updatePresetField({ motion: clampMotion(Number(e.target.value)) })}
+                />
+              </label>
+              <label>
+                Animation {presetConfigs[preset].animation.toFixed(2)}
+                <input
+                  type="range"
+                  min={0.45}
+                  max={1.8}
+                  step={0.01}
+                  value={presetConfigs[preset].animation}
+                  onChange={(e) => updatePresetField({ animation: clampMotion(Number(e.target.value)) })}
+                />
+              </label>
+              <label>
+                Default FX
+                <select
+                  value={presetConfigs[preset].defaultIntensity}
+                  onChange={(e) => updatePresetField({ defaultIntensity: e.target.value as FxIntensity })}
+                >
+                  <option value="low">low</option>
+                  <option value="med">med</option>
+                  <option value="high">high</option>
+                </select>
+              </label>
+            </div>
+            <div className="preset-actions">
+              <button className="chip" onClick={exportPresets}>Export JSON</button>
+              <label className="chip import-chip">
+                Import JSON
+                <input
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={(e) => void importPresets(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            </div>
+          </section>
 
-          <label className="crossfade">
-            <span>Crossfade {crossfadeSec.toFixed(1)}s</span>
-            <input
-              type="range"
-              min={0}
-              max={8}
-              step={0.5}
-              value={crossfadeSec}
-              onChange={(e) => setCrossfadeSec(clampCrossfade(Number(e.target.value)))}
-              aria-label="Crossfade duration"
-            />
-          </label>
-        </div>
+          <section className="queue-box" aria-label="Queue order">
+            <p className="queue-title">Queue ({shuffle ? 'shuffled' : 'ordered'})</p>
+            <ul className="playlist">
+              {queueOrder.map((trackIndex, position) => {
+                const track = tracks[trackIndex];
+                if (!track) return null;
+                const isCurrent = position === queuePos;
+                return (
+                  <li key={`${track.id}-${position}`}>
+                    <button className={isCurrent ? 'active' : ''} onClick={() => void selectQueuePosition(position)} aria-label={`Play ${track.title}`}>
+                      <strong>{position + 1}. {track.title}</strong>
+                      <span>{track.artist}</span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
 
-        <div className="mode-row" role="group" aria-label="Playback modes">
-          <button className={shuffle ? 'chip active' : 'chip'} onClick={toggleShuffle} aria-pressed={shuffle} aria-label="Toggle shuffle mode">
-            Shuffle {shuffle ? 'On' : 'Off'}
-          </button>
-          <button
-            className="chip"
-            onClick={() => setRepeatMode((prev) => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'))}
-            aria-label="Toggle repeat mode"
-          >
-            Repeat: {repeatMode}
-          </button>
-          <label className="chip fx-chip" aria-label="Effect intensity selector">
-            FX
-            <select value={fxIntensity} onChange={(e) => setFxIntensity(e.target.value as FxIntensity)} aria-label="Effect intensity">
-              <option value="low">low</option>
-              <option value="med">med</option>
-              <option value="high">high</option>
-            </select>
-          </label>
-        </div>
-
-        <section className="queue-box" aria-label="Queue order">
-          <p className="queue-title">Queue ({shuffle ? 'shuffled' : 'ordered'})</p>
-          <ul className="playlist">
-            {queueOrder.map((trackIndex, position) => {
-              const track = tracks[trackIndex];
-              if (!track) return null;
-              const isCurrent = position === queuePos;
-              return (
-                <li key={`${track.id}-${position}`}>
-                  <button className={isCurrent ? 'active' : ''} onClick={() => void selectQueuePosition(position)} aria-label={`Play ${track.title}`}>
-                    <strong>{position + 1}. {track.title}</strong>
-                    <span>{track.artist}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ul>
-        </section>
-
-        <footer className="shortcuts" aria-label="Keyboard shortcuts">
-          <span>Space: play/pause</span>
-          <span>←/→: seek ±5s</span>
-          <span>N/P: next/prev</span>
-          <span>S: shuffle</span>
-          <span>R: repeat mode</span>
-          <span>M: mute</span>
-        </footer>
+          <footer className="shortcuts" aria-label="Keyboard shortcuts">
+            <span>Space: play/pause</span>
+            <span>←/→: seek ±5s</span>
+            <span>N/P: next/prev</span>
+            <span>S: shuffle</span>
+            <span>R: repeat mode</span>
+            <span>M: mute</span>
+          </footer>
+        </details>
       </section>
     </main>
   );
