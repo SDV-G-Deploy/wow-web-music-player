@@ -17,6 +17,8 @@ on:
 jobs:
   build-debug-apk:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -34,6 +36,9 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Install root dependencies
         run: npm ci
 
@@ -46,12 +51,17 @@ jobs:
         working-directory: android-app
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug
+        run: ./gradlew --no-daemon assembleDebug
         working-directory: android-app/android
+
+      - name: Verify debug APK output
+        run: |
+          ls -lah android-app/android/app/build/outputs/apk/debug
+          test -f android-app/android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload debug APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: wow-web-music-player-debug-apk
-          path: android-app/android/app/build/outputs/apk/debug/app-debug.apk
+          path: android-app/android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
